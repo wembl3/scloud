@@ -16,6 +16,8 @@
 - 📻 **Spotify-style Autoplay:** When your playlist or track finishes, the player automatically queries SoundCloud's recommendation algorithms (`/related`) to queue up similar tracks infinitely.
 - 📁 **Personal Playlists & Library:** Log into your SoundCloud account to browse, search, and stream your personal playlists.
 - 🔀 **Smart Playlist Shuffle:** Shuffles tracks within your playlist first. Autoplay only starts when all songs from your playlist have been heard. Turning shuffle off restores the original track ordering.
+- 🖼️ **Album Art in MPRIS Desktop Widgets:** Automatically caches high-res (500x500) album artwork and feeds it to Linux desktop media widgets (KDE Plasma, GNOME, Waybar, Hyprland, Dunst, lockscreen) via `mpris:artUrl`.
+- ⚙️ **Interactive Settings Menu:** Built-in settings screen (`[3] ⚙️ Settings` or press `3`/`o`) to easily toggle cover art downloading, autoplay, shuffle, manage accounts, and purge cache.
 - 🐧 **Full Linux MPRIS v2 Desktop Integration:** Works out of the box with `playerctl`, media keys, KDE Plasma widgets, GNOME media controls, and lockscreen players.
 - 🔍 **Instant Search:** Find and stream any song, artist, or remix across all of SoundCloud in real-time.
 - 👤 **Guest Mode & Easy Auth:** Works out of the box in Guest mode without signing in. Login with 1 command (`sc-player login`) or auto-detect your session from Firefox.
@@ -92,9 +94,10 @@ sc-player status
 
 | Key | Action |
 |---|---|
-| `Tab` / `1`, `2` | Switch between **[1] 📁 My Playlists** and **[2] 🔍 Search** |
+| `Tab` / `1`, `2`, `3` | Switch between **[1] 📁 Playlists**, **[2] 🔍 Search**, and **[3] ⚙️ Settings** |
+| `3` / `o` | Quickly open Settings menu |
 | `/` | Focus global search bar |
-| `Enter` | Open selected playlist / Play selected track |
+| `Enter` | Select playlist / track, or toggle option in Settings |
 | `p` | Play entire playlist in queue |
 | `s` | Toggle **Shuffle** (randomize upcoming playlist tracks) |
 | `a` | Toggle **Autoplay** (Spotify-like infinite radio for similar music) |

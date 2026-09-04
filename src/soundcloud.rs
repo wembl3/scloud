@@ -5,12 +5,15 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub const DEFAULT_CLIENT_ID: &str = "Pb72ranhoyt6gw7hM7TkzUItXlMWSNSo";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TrackUser {
     pub username: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -38,8 +41,17 @@ pub struct Track {
     pub title: String,
     #[serde(default)]
     pub duration: u64,
+    #[serde(default)]
+    pub artwork_url: Option<String>,
     pub user: TrackUser,
     pub media: TrackMedia,
+}
+
+impl Track {
+    pub fn get_artwork_url(&self) -> Option<String> {
+        let raw = self.artwork_url.as_deref().or(self.user.avatar_url.as_deref())?;
+        Some(raw.replace("-large.", "-t500x500."))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -88,9 +100,27 @@ struct RawPlaylistResponse {
     pub tracks: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub oauth_token: Option<String>,
+    #[serde(default = "default_true")]
+    pub download_covers: bool,
+    #[serde(default = "default_true")]
+    pub autoplay: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            oauth_token: None,
+            download_covers: true,
+            autoplay: true,
+        }
+    }
 }
 
 pub struct SoundCloud {
@@ -137,40 +167,41 @@ impl SoundCloud {
         dirs_config().join("sc-player").join("config.json")
     }
 
-    pub fn load_token_from_config() -> Option<String> {
+    pub fn load_config() -> Config {
         let path = Self::config_path();
         if path.exists() {
             if let Ok(content) = fs::read_to_string(&path) {
                 if let Ok(config) = serde_json::from_str::<Config>(&content) {
-                    return config.oauth_token;
+                    return config;
                 }
             }
         }
-        None
+        Config::default()
+    }
+
+    pub fn save_config(config: &Config) -> Result<()> {
+        let path = Self::config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_string_pretty(config)?)?;
+        Ok(())
+    }
+
+    pub fn load_token_from_config() -> Option<String> {
+        Self::load_config().oauth_token
     }
 
     pub fn save_token_to_config(token: &str) -> Result<()> {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let config = Config {
-            oauth_token: Some(token.trim().to_string()),
-        };
-        fs::write(path, serde_json::to_string_pretty(&config)?)?;
-        Ok(())
+        let mut config = Self::load_config();
+        config.oauth_token = Some(token.trim().to_string());
+        Self::save_config(&config)
     }
 
     pub fn clear_config_token() -> Result<()> {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let config = Config {
-            oauth_token: None,
-        };
-        fs::write(path, serde_json::to_string_pretty(&config)?)?;
-        Ok(())
+        let mut config = Self::load_config();
+        config.oauth_token = None;
+        Self::save_config(&config)
     }
 
     pub fn logout(&mut self) -> Result<()> {
@@ -454,6 +485,62 @@ fn dirs_config() -> PathBuf {
     }
 }
 
+pub fn dirs_cache() -> PathBuf {
+    if let Ok(cache_home) = std::env::var("XDG_CACHE_HOME") {
+        PathBuf::from(cache_home)
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".cache")
+    }
+}
+
+pub fn covers_cache_dir() -> PathBuf {
+    dirs_cache().join("sc-player").join("covers")
+}
+
+pub fn count_cached_covers() -> usize {
+    let cache_dir = covers_cache_dir();
+    if let Ok(entries) = fs::read_dir(cache_dir) {
+        entries.flatten().count()
+    } else {
+        0
+    }
+}
+
+pub async fn download_track_cover(track_id: u64, artwork_url: &str) -> Option<PathBuf> {
+    let cache_dir = covers_cache_dir();
+    if fs::create_dir_all(&cache_dir).is_err() {
+        return None;
+    }
+    let file_path = cache_dir.join(format!("{}.jpg", track_id));
+    if file_path.exists() {
+        if let Ok(meta) = fs::metadata(&file_path) {
+            if meta.len() > 0 {
+                return Some(file_path);
+            }
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?;
+
+    let resp = client.get(artwork_url)
+        .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64)")
+        .send()
+        .await
+        .ok()?;
+
+    if resp.status().is_success() {
+        let bytes = resp.bytes().await.ok()?;
+        if fs::write(&file_path, bytes).is_ok() {
+            return Some(file_path);
+        }
+    }
+    None
+}
+
 mod urlencoding {
     pub fn encode(s: &str) -> String {
         let mut encoded = String::new();
@@ -467,5 +554,58 @@ mod urlencoding {
             }
         }
         encoded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_track_artwork_url_transformation() {
+        let track = Track {
+            id: 12345,
+            title: "Test Song".to_string(),
+            duration: 180000,
+            artwork_url: Some("https://i1.sndcdn.com/artworks-xyz-large.jpg".to_string()),
+            user: TrackUser {
+                username: "Artist".to_string(),
+                avatar_url: Some("https://i1.sndcdn.com/avatars-abc-large.jpg".to_string()),
+            },
+            media: TrackMedia { transcodings: vec![] },
+        };
+
+        assert_eq!(
+            track.get_artwork_url(),
+            Some("https://i1.sndcdn.com/artworks-xyz-t500x500.jpg".to_string())
+        );
+
+        // Fallback to avatar if artwork_url is None
+        let track_no_art = Track {
+            id: 67890,
+            title: "Test Song 2".to_string(),
+            duration: 120000,
+            artwork_url: None,
+            user: TrackUser {
+                username: "Artist".to_string(),
+                avatar_url: Some("https://i1.sndcdn.com/avatars-abc-large.jpg".to_string()),
+            },
+            media: TrackMedia { transcodings: vec![] },
+        };
+
+        assert_eq!(
+            track_no_art.get_artwork_url(),
+            Some("https://i1.sndcdn.com/avatars-abc-t500x500.jpg".to_string())
+        );
+    }
+
+    #[test]
+    fn test_config_backward_compatibility() {
+        // Old config with only oauth_token
+        let old_json = r#"{"oauth_token": "my-secret-token"}"#;
+        let config: Config = serde_json::from_str(old_json).unwrap();
+        assert_eq!(config.oauth_token, Some("my-secret-token".to_string()));
+        assert!(config.download_covers);
+        assert!(config.autoplay);
     }
 }

@@ -29,7 +29,10 @@ use tokio::sync::mpsc;
 enum ActiveTab {
     Playlists,
     Search,
+    Settings,
 }
+
+const SETTINGS_COUNT: usize = 5;
 
 #[derive(PartialEq)]
 enum ViewState {
@@ -64,11 +67,13 @@ struct App {
     search_list_state: ListState,
     playlist_list_state: ListState,
     track_list_state: ListState,
+    settings_list_state: ListState,
     current_track: Option<Track>,
     queue: VecDeque<Track>,
     history_ids: HashSet<u64>,
     autoplay: bool,
     shuffle: bool,
+    download_covers: bool,
     input_mode: InputMode,
     status_message: String,
     is_loading: bool,
@@ -77,6 +82,7 @@ struct App {
 impl App {
     async fn new(event_tx: mpsc::Sender<()>, mpris: Option<Arc<MprisManager>>) -> Result<Self> {
         let sc = SoundCloud::new().await;
+        let config = SoundCloud::load_config();
         let player = Player::new(event_tx).await?;
 
         let mut search_list_state = ListState::default();
@@ -87,6 +93,9 @@ impl App {
 
         let mut track_list_state = ListState::default();
         track_list_state.select(Some(0));
+
+        let mut settings_list_state = ListState::default();
+        settings_list_state.select(Some(0));
 
         let mut app = Self {
             sc,
@@ -103,11 +112,13 @@ impl App {
             search_list_state,
             playlist_list_state,
             track_list_state,
+            settings_list_state,
             current_track: None,
             queue: VecDeque::new(),
             history_ids: HashSet::new(),
-            autoplay: true,
+            autoplay: config.autoplay,
             shuffle: false,
+            download_covers: config.download_covers,
             input_mode: InputMode::Normal,
             status_message: String::new(),
             is_loading: false,
@@ -264,9 +275,41 @@ impl App {
                     self.history_ids.insert(track.id);
                     self.status_message = format!("Playing: {} - {}", track.user.username, track.title);
 
-                    // Update Linux MPRIS system media controls
+                    // Update Linux MPRIS system media controls & artwork
                     if let Some(ref m) = self.mpris {
-                        m.update_track(&track.title, &track.user.username, track.duration as f64 / 1000.0).await;
+                        let mpris_clone = m.clone();
+                        let track_id = track.id;
+                        let artwork_opt = track.get_artwork_url();
+                        let download_covers = self.download_covers;
+
+                        let cached_uri = if download_covers {
+                            let cache_file = soundcloud::covers_cache_dir().join(format!("{}.jpg", track_id));
+                            if cache_file.exists() {
+                                Some(format!("file://{}", cache_file.display()))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        m.update_track(
+                            &track.title,
+                            &track.user.username,
+                            track.duration as f64 / 1000.0,
+                            cached_uri.as_deref(),
+                        ).await;
+
+                        if download_covers && cached_uri.is_none() {
+                            if let Some(art_url) = artwork_opt {
+                                tokio::spawn(async move {
+                                    if let Some(path) = soundcloud::download_track_cover(track_id, &art_url).await {
+                                        let uri = format!("file://{}", path.display());
+                                        mpris_clone.update_art_url(Some(&uri)).await;
+                                    }
+                                });
+                            }
+                        }
                     }
 
                     self.current_track = Some(track);
@@ -408,8 +451,85 @@ impl App {
         self.input_mode = InputMode::Normal;
     }
 
+    async fn toggle_setting(&mut self) {
+        let selected = self.settings_list_state.selected().unwrap_or(0);
+        match selected {
+            0 => {
+                // Download Covers
+                self.download_covers = !self.download_covers;
+                let mut config = soundcloud::SoundCloud::load_config();
+                config.download_covers = self.download_covers;
+                let _ = soundcloud::SoundCloud::save_config(&config);
+
+                if self.download_covers {
+                    self.status_message = "🖼️ Cover downloading for MPRIS widget: ENABLED".to_string();
+                    if let Some(ref track) = self.current_track {
+                        if let Some(ref m) = self.mpris {
+                            let mpris_clone = m.clone();
+                            let track_id = track.id;
+                            let cache_file = soundcloud::covers_cache_dir().join(format!("{}.jpg", track_id));
+                            if cache_file.exists() {
+                                m.update_art_url(Some(&format!("file://{}", cache_file.display()))).await;
+                            } else if let Some(art_url) = track.get_artwork_url() {
+                                tokio::spawn(async move {
+                                    if let Some(path) = soundcloud::download_track_cover(track_id, &art_url).await {
+                                        let uri = format!("file://{}", path.display());
+                                        mpris_clone.update_art_url(Some(&uri)).await;
+                                    }
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    self.status_message = "🖼️ Cover downloading for MPRIS widget: DISABLED".to_string();
+                    if let Some(ref m) = self.mpris {
+                        m.update_art_url(None).await;
+                    }
+                }
+            }
+            1 => {
+                // Autoplay
+                self.autoplay = !self.autoplay;
+                let mut config = soundcloud::SoundCloud::load_config();
+                config.autoplay = self.autoplay;
+                let _ = soundcloud::SoundCloud::save_config(&config);
+                self.status_message = format!(
+                    "📻 Autoplay is now {}",
+                    if self.autoplay { "ON (infinite similar music!)" } else { "OFF" }
+                );
+            }
+            2 => {
+                // Shuffle
+                self.toggle_shuffle();
+            }
+            3 => {
+                // Account
+                self.toggle_account().await;
+            }
+            4 => {
+                // Clear Cover Cache
+                let cache_dir = soundcloud::covers_cache_dir();
+                let mut count = 0;
+                if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+                    for entry in entries.flatten() {
+                        if std::fs::remove_file(entry.path()).is_ok() {
+                            count += 1;
+                        }
+                    }
+                }
+                self.status_message = format!("🗑️ Removed {} cached cover files.", count);
+            }
+            _ => {}
+        }
+    }
+
     fn select_next(&mut self) {
         match self.active_tab {
+            ActiveTab::Settings => {
+                let len = SETTINGS_COUNT;
+                let i = self.settings_list_state.selected().map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
+                self.settings_list_state.select(Some(i));
+            }
             ActiveTab::Search => {
                 let len = self.search_results.len();
                 if len > 0 {
@@ -440,6 +560,11 @@ impl App {
 
     fn select_prev(&mut self) {
         match self.active_tab {
+            ActiveTab::Settings => {
+                let len = SETTINGS_COUNT;
+                let i = self.settings_list_state.selected().map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
+                self.settings_list_state.select(Some(i));
+            }
             ActiveTab::Search => {
                 let len = self.search_results.len();
                 if len > 0 {
@@ -691,6 +816,12 @@ async fn main() -> Result<()> {
                 Span::styled(" [2] 🔍 Search ", Style::default().fg(Color::Gray))
             };
 
+            let tab_settings = if app.active_tab == ActiveTab::Settings {
+                Span::styled(" [3] ⚙️ Settings ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(" [3] ⚙️ Settings ", Style::default().fg(Color::Gray))
+            };
+
             let shuffle_badge = if app.shuffle {
                 Span::styled(" [🔀 SHUFFLE: ON] ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
             } else {
@@ -716,6 +847,8 @@ async fn main() -> Result<()> {
                 tab_playlists,
                 Span::raw(" "),
                 tab_search,
+                Span::raw(" "),
+                tab_settings,
                 shuffle_badge,
                 autoplay_badge,
                 Span::styled(format!("Vol: {:.0}% ", state.volume), Style::default().fg(Color::Yellow)),
@@ -734,6 +867,63 @@ async fn main() -> Result<()> {
 
             // Left Pane: depending on active tab
             match app.active_tab {
+                ActiveTab::Settings => {
+                    let cached_count = soundcloud::count_cached_covers();
+                    let account_status = if let Some(ref prof) = app.sc.user_profile {
+                        format!("@{} (Sign out)", prof.username)
+                    } else if app.sc.oauth_token.is_some() {
+                        "Logged In (Sign out)".to_string()
+                    } else {
+                        "Guest Mode (Sign in)".to_string()
+                    };
+
+                    let items = vec![
+                        ListItem::new(Line::from(vec![
+                            Span::styled(" 🖼️  Download Covers for MPRIS Widget    ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                            if app.download_covers {
+                                Span::styled("[ ENABLED ]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                            } else {
+                                Span::styled("[ DISABLED ]", Style::default().fg(Color::Red))
+                            },
+                        ])),
+                        ListItem::new(Line::from(vec![
+                            Span::styled(" 📻  Spotify-style Autoplay              ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                            if app.autoplay {
+                                Span::styled("[ ENABLED ]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                            } else {
+                                Span::styled("[ DISABLED ]", Style::default().fg(Color::Red))
+                            },
+                        ])),
+                        ListItem::new(Line::from(vec![
+                            Span::styled(" 🔀  Smart Playlist Shuffle              ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                            if app.shuffle {
+                                Span::styled("[ ENABLED ]", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+                            } else {
+                                Span::styled("[ DISABLED ]", Style::default().fg(Color::DarkGray))
+                            },
+                        ])),
+                        ListItem::new(Line::from(vec![
+                            Span::styled(" 👤  SoundCloud Account                  ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                            Span::styled(format!("[ {} ]", account_status), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                        ])),
+                        ListItem::new(Line::from(vec![
+                            Span::styled(" 🗑️  Purge Cover Art Cache               ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                            Span::styled(format!("[ {} cached files ]", cached_count), Style::default().fg(Color::Cyan)),
+                        ])),
+                    ];
+
+                    let list = List::new(items)
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title(" ⚙️ Settings (Press [Enter] to toggle / activate) ")
+                                .border_type(BorderType::Rounded),
+                        )
+                        .highlight_style(Style::default().bg(Color::Rgb(40, 60, 100)).add_modifier(Modifier::BOLD))
+                        .highlight_symbol("▶ ");
+
+                    f.render_stateful_widget(list, main_chunks[0], &mut app.settings_list_state);
+                }
                 ActiveTab::Playlists => {
                     if app.sc.oauth_token.is_none() {
                         let text = vec![
@@ -848,26 +1038,131 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Right Pane: Upcoming Queue
-            let queue_items: Vec<ListItem> = app
-                .queue
-                .iter()
-                .enumerate()
-                .take(15)
-                .map(|(idx, t)| {
-                    let content = Line::from(vec![
-                        Span::styled(format!("{}. ", idx + 1), Style::default().fg(Color::DarkGray)),
-                        Span::styled(truncate_str(&t.title, 22), Style::default().fg(Color::Gray)),
-                    ]);
-                    ListItem::new(content)
-                })
-                .collect();
+            // Right Pane: Settings details OR Upcoming Queue
+            if app.active_tab == ActiveTab::Settings {
+                let cached_count = soundcloud::count_cached_covers();
+                let selected = app.settings_list_state.selected().unwrap_or(0);
+                let (title, details) = match selected {
+                    0 => (
+                        " 🖼️ Cover Art Settings ",
+                        vec![
+                            Line::from(Span::styled("Download Covers for MPRIS Widget", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::raw("Status: "),
+                                if app.download_covers {
+                                    Span::styled("ENABLED", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                                } else {
+                                    Span::styled("DISABLED", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                                },
+                            ]),
+                            Line::from(""),
+                            Line::from("When enabled, SoundRust automatically downloads high-res (500x500) album art for the playing track to display in:"),
+                            Line::from(""),
+                            Line::from(Span::styled(" • KDE Plasma Media Widget", Style::default().fg(Color::White))),
+                            Line::from(Span::styled(" • GNOME media controls & lockscreen", Style::default().fg(Color::White))),
+                            Line::from(Span::styled(" • Waybar / Hyprland media modules", Style::default().fg(Color::White))),
+                            Line::from(Span::styled(" • Dunst / Mako / SwayNC popups", Style::default().fg(Color::White))),
+                            Line::from(""),
+                            Line::from(Span::styled("📁 Storage: ~/.cache/sc-player/covers/", Style::default().fg(Color::DarkGray))),
+                            Line::from(""),
+                            Line::from(Span::styled("💡 Press [Enter] to toggle.", Style::default().fg(Color::Yellow))),
+                        ],
+                    ),
+                    1 => (
+                        " 📻 Autoplay Settings ",
+                        vec![
+                            Line::from(Span::styled("Spotify-style Infinite Autoplay", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))),
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::raw("Status: "),
+                                if app.autoplay {
+                                    Span::styled("ENABLED", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                                } else {
+                                    Span::styled("DISABLED", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                                },
+                            ]),
+                            Line::from(""),
+                            Line::from("When your playlist or queue ends, SoundRust automatically queries SoundCloud recommendations (/related) to queue up similar tracks indefinitely."),
+                            Line::from(""),
+                            Line::from(Span::styled("💡 Press [Enter] or [a] to toggle.", Style::default().fg(Color::Yellow))),
+                        ],
+                    ),
+                    2 => (
+                        " 🔀 Shuffle Settings ",
+                        vec![
+                            Line::from(Span::styled("Smart Playlist Shuffle", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))),
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::raw("Status: "),
+                                if app.shuffle {
+                                    Span::styled("ENABLED", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+                                } else {
+                                    Span::styled("DISABLED", Style::default().fg(Color::DarkGray))
+                                },
+                            ]),
+                            Line::from(""),
+                            Line::from("Shuffles remaining tracks within your active playlist. Autoplay only begins after all tracks from the playlist are played."),
+                            Line::from(""),
+                            Line::from(Span::styled("💡 Press [Enter] or [s] to toggle.", Style::default().fg(Color::Yellow))),
+                        ],
+                    ),
+                    3 => (
+                        " 👤 Account Settings ",
+                        vec![
+                            Line::from(Span::styled("SoundCloud Account", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+                            Line::from(""),
+                            Line::from(if let Some(ref prof) = app.sc.user_profile {
+                                format!("Logged in as @{} (ID: {})", prof.username, prof.id)
+                            } else {
+                                "Currently in Guest Mode (unauthenticated)".to_string()
+                            }),
+                            Line::from(""),
+                            Line::from("Logging in grants access to your personal playlists and likes."),
+                            Line::from(""),
+                            Line::from(Span::styled("💡 Press [Enter] or [Shift+L] to log in / out.", Style::default().fg(Color::Yellow))),
+                        ],
+                    ),
+                    4 => (
+                        " 🗑️ Cache Settings ",
+                        vec![
+                            Line::from(Span::styled("Purge Cover Art Cache", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                            Line::from(""),
+                            Line::from(format!("Currently {} cached cover images on disk.", cached_count)),
+                            Line::from(""),
+                            Line::from("Deletes cached .jpg images from ~/.cache/sc-player/covers/ to free up disk space."),
+                            Line::from(""),
+                            Line::from(Span::styled("💡 Press [Enter] to delete cache.", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))),
+                        ],
+                    ),
+                    _ => (" ⚙️ Details ", vec![]),
+                };
 
-            let queue_title = format!(" 📻 Upcoming Queue ({}) ", app.queue.len());
-            let queue_list = List::new(queue_items)
-                .block(Block::default().borders(Borders::ALL).title(queue_title).border_type(BorderType::Rounded));
+                let widget = Paragraph::new(details)
+                    .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded));
+                f.render_widget(widget, main_chunks[1]);
+            } else {
+                // Right Pane: Upcoming Queue
+                let queue_items: Vec<ListItem> = app
+                    .queue
+                    .iter()
+                    .enumerate()
+                    .take(15)
+                    .map(|(idx, t)| {
+                        let content = Line::from(vec![
+                            Span::styled(format!("{}. ", idx + 1), Style::default().fg(Color::DarkGray)),
+                            Span::styled(truncate_str(&t.title, 22), Style::default().fg(Color::Gray)),
+                        ]);
+                        ListItem::new(content)
+                    })
+                    .collect();
 
-            f.render_widget(queue_list, main_chunks[1]);
+                let queue_title = format!(" 📻 Upcoming Queue ({}) ", app.queue.len());
+                let queue_list = List::new(queue_items)
+                    .block(Block::default().borders(Borders::ALL).title(queue_title).border_type(BorderType::Rounded));
+
+                f.render_widget(queue_list, main_chunks[1]);
+            }
 
             // 3. Now Playing Bar
             let track_info = if let Some(ref t) = app.current_track {
@@ -895,10 +1190,10 @@ async fn main() -> Result<()> {
 
             // 4. Footer controls help
             let footer = Paragraph::new(Line::from(vec![
-                Span::styled(" [Tab/1,2]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(" [Tab/1,2,3]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::raw(" Tabs "),
                 Span::styled("[Enter]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(" Play "),
+                Span::raw(" Select/Toggle "),
                 Span::styled("[p]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::raw(" Play All "),
                 Span::styled("[s]", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
@@ -1008,7 +1303,8 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             KeyCode::Tab => {
                 app.active_tab = match app.active_tab {
                     ActiveTab::Playlists => ActiveTab::Search,
-                    ActiveTab::Search => ActiveTab::Playlists,
+                    ActiveTab::Search => ActiveTab::Settings,
+                    ActiveTab::Settings => ActiveTab::Playlists,
                 };
             }
             KeyCode::Char('1') => {
@@ -1016,6 +1312,9 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             }
             KeyCode::Char('2') => {
                 app.active_tab = ActiveTab::Search;
+            }
+            KeyCode::Char('3') | KeyCode::Char('o') => {
+                app.active_tab = ActiveTab::Settings;
             }
             KeyCode::Char('/') => {
                 app.input_mode = InputMode::Searching;
@@ -1031,10 +1330,15 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 if app.active_tab == ActiveTab::Playlists && app.view_state == ViewState::PlaylistDetail {
                     app.view_state = ViewState::PlaylistList;
                     app.status_message = "Back to playlists list".to_string();
+                } else if app.active_tab == ActiveTab::Settings {
+                    app.active_tab = ActiveTab::Playlists;
                 }
             }
             KeyCode::Enter => {
                 match app.active_tab {
+                    ActiveTab::Settings => {
+                        app.toggle_setting().await;
+                    }
                     ActiveTab::Search => {
                         if let Some(i) = app.search_list_state.selected() {
                             if let Some(track) = app.search_results.get(i).cloned() {
@@ -1089,6 +1393,9 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             }
             KeyCode::Char('a') => {
                 app.autoplay = !app.autoplay;
+                let mut config = soundcloud::SoundCloud::load_config();
+                config.autoplay = app.autoplay;
+                let _ = soundcloud::SoundCloud::save_config(&config);
                 app.status_message = format!(
                     "📻 Autoplay is now {}",
                     if app.autoplay { "ON (infinite similar music!)" } else { "OFF" }

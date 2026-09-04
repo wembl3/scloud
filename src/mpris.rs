@@ -28,6 +28,7 @@ pub struct MprisSharedState {
     pub is_playing: Arc<AtomicBool>,
     pub shuffle: Arc<AtomicBool>,
     pub volume: Arc<RwLock<f64>>,
+    pub art_url: Arc<RwLock<Option<String>>>,
 }
 
 pub struct MprisHandler {
@@ -178,12 +179,18 @@ impl PlayerInterface for MprisHandler {
         let title = self.state.title.read().await.clone();
         let artist = self.state.artist.read().await.clone();
         let dur = *self.state.duration_sec.read().await;
+        let art_url = self.state.art_url.read().await.clone();
 
-        let meta = Metadata::builder()
+        let mut builder = Metadata::builder()
             .title(title)
             .artist([artist])
-            .length(Time::from_micros((dur * 1_000_000.0) as i64))
-            .build();
+            .length(Time::from_micros((dur * 1_000_000.0) as i64));
+
+        if let Some(ref art) = art_url {
+            builder = builder.art_url(art.as_str());
+        }
+
+        let meta = builder.build();
 
         Ok(meta)
     }
@@ -252,6 +259,7 @@ impl MprisManager {
             is_playing: Arc::new(AtomicBool::new(false)),
             shuffle: Arc::new(AtomicBool::new(false)),
             volume: Arc::new(RwLock::new(85.0)),
+            art_url: Arc::new(RwLock::new(None)),
         };
 
         let handler = MprisHandler::new(action_tx, state.clone());
@@ -261,22 +269,50 @@ impl MprisManager {
         Ok(Self { server, state })
     }
 
-    pub async fn update_track(&self, title: &str, artist: &str, duration_sec: f64) {
+    pub async fn update_track(&self, title: &str, artist: &str, duration_sec: f64, art_url: Option<&str>) {
         *self.state.title.write().await = title.to_string();
         *self.state.artist.write().await = artist.to_string();
         *self.state.duration_sec.write().await = duration_sec;
+        *self.state.art_url.write().await = art_url.map(|s| s.to_string());
         self.state.is_playing.store(true, Ordering::SeqCst);
         self.state.is_paused.store(false, Ordering::SeqCst);
 
-        let meta = Metadata::builder()
+        let mut builder = Metadata::builder()
             .title(title)
             .artist([artist])
-            .length(Time::from_micros((duration_sec * 1_000_000.0) as i64))
-            .build();
+            .length(Time::from_micros((duration_sec * 1_000_000.0) as i64));
+
+        if let Some(art) = art_url {
+            builder = builder.art_url(art);
+        }
+
+        let meta = builder.build();
 
         let _ = self.server.properties_changed([
             Property::Metadata(meta),
             Property::PlaybackStatus(PlaybackStatus::Playing),
+        ]).await;
+    }
+
+    pub async fn update_art_url(&self, art_url: Option<&str>) {
+        *self.state.art_url.write().await = art_url.map(|s| s.to_string());
+        let title = self.state.title.read().await.clone();
+        let artist = self.state.artist.read().await.clone();
+        let duration_sec = *self.state.duration_sec.read().await;
+
+        let mut builder = Metadata::builder()
+            .title(title)
+            .artist([artist])
+            .length(Time::from_micros((duration_sec * 1_000_000.0) as i64));
+
+        if let Some(art) = art_url {
+            builder = builder.art_url(art);
+        }
+
+        let meta = builder.build();
+
+        let _ = self.server.properties_changed([
+            Property::Metadata(meta),
         ]).await;
     }
 
@@ -307,6 +343,7 @@ impl MprisManager {
         self.state.is_playing.store(false, Ordering::SeqCst);
         self.state.is_paused.store(false, Ordering::SeqCst);
         *self.state.position_sec.write().await = 0.0;
+        *self.state.art_url.write().await = None;
         let _ = self.server.properties_changed([
             Property::PlaybackStatus(PlaybackStatus::Stopped),
         ]).await;
