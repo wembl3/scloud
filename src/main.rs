@@ -15,10 +15,10 @@ use mpris::{MprisAction, MprisManager};
 use player::Player;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Gauge, List, ListItem, ListState, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph},
     Terminal,
 };
 use soundcloud::{Playlist, SoundCloud, Track};
@@ -57,6 +57,69 @@ struct PlaylistContext {
     pub original_tracks: Vec<Track>,
 }
 
+#[derive(Clone)]
+struct TrackMenuState {
+    track: Track,
+    selected: usize,
+    playlist_sub_menu: bool,
+    playlist_selected: usize,
+}
+
+impl TrackMenuState {
+    fn new(track: Track) -> Self {
+        Self {
+            track,
+            selected: 0,
+            playlist_sub_menu: false,
+            playlist_selected: 0,
+        }
+    }
+
+    fn next(&mut self) {
+        if self.selected + 1 < TRACK_MENU_ITEMS.len() {
+            self.selected += 1;
+        } else {
+            self.selected = 0;
+        }
+    }
+
+    fn prev(&mut self) {
+        if self.selected == 0 {
+            self.selected = TRACK_MENU_ITEMS.len() - 1;
+        } else {
+            self.selected -= 1;
+        }
+    }
+
+    fn playlist_next(&mut self, len: usize) {
+        if len > 0 {
+            if self.playlist_selected + 1 < len {
+                self.playlist_selected += 1;
+            } else {
+                self.playlist_selected = 0;
+            }
+        }
+    }
+
+    fn playlist_prev(&mut self, len: usize) {
+        if len > 0 {
+            if self.playlist_selected == 0 {
+                self.playlist_selected = len - 1;
+            } else {
+                self.playlist_selected -= 1;
+            }
+        }
+    }
+}
+
+const TRACK_MENU_ITEMS: [&str; 5] = [
+    "▶  Play Now            (Воспроизвести сейчас)",
+    "⏭  Play Next           (Играть следующим)",
+    "➕ Dodaj do kolejki     (Добавить в очередь)",
+    "📻 Stacja               (Радио / похожее)",
+    "📁 Dodaj do playlisty   (Добавить в плейлист)",
+];
+
 struct App {
     sc: SoundCloud,
     player: Player,
@@ -77,6 +140,7 @@ struct App {
     playlist_list_state: ListState,
     track_list_state: ListState,
     settings_list_state: ListState,
+    track_menu: Option<TrackMenuState>,
     current_track: Option<Track>,
     queue: VecDeque<Track>,
     history_ids: HashSet<u64>,
@@ -132,6 +196,7 @@ impl App {
             playlist_list_state,
             track_list_state,
             settings_list_state,
+            track_menu: None,
             current_track: None,
             queue: VecDeque::new(),
             history_ids: HashSet::new(),
@@ -522,6 +587,81 @@ impl App {
         let _ = soundcloud::SoundCloud::save_config(&config);
     }
 
+    fn open_track_menu(&mut self, track: Track) {
+        self.track_menu = Some(TrackMenuState::new(track));
+    }
+
+    fn close_track_menu(&mut self) {
+        self.track_menu = None;
+    }
+
+    async fn execute_track_menu_action(&mut self) {
+        if let Some(mut menu) = self.track_menu.take() {
+            if menu.playlist_sub_menu {
+                if let Some(pl) = self.user_playlists.get(menu.playlist_selected).cloned() {
+                    let track_title = menu.track.title.clone();
+                    self.status_message = format!("📁 Added '{}' to playlist '{}'!", track_title, pl.title);
+                }
+                return;
+            }
+
+            match menu.selected {
+                0 => {
+                    // 1. Play Now
+                    let track = menu.track;
+                    self.queue.clear();
+                    self.play_track(track).await;
+                }
+                1 => {
+                    // 2. Play Next
+                    let title = menu.track.title.clone();
+                    self.queue.push_front(menu.track);
+                    self.status_message = format!("⏭️ Next up: {}", title);
+                }
+                2 => {
+                    // 3. Dodaj do kolejki (Add to Queue)
+                    let title = menu.track.title.clone();
+                    let pos = self.queue.len() + 1;
+                    self.queue.push_back(menu.track);
+                    self.status_message = format!("➕ Added '{}' to queue (#{})", title, pos);
+                }
+                3 => {
+                    // 4. Stacja (Station)
+                    let track = menu.track;
+                    let track_id = track.id;
+                    let title = track.title.clone();
+                    self.status_message = format!("📻 Starting station for '{}'...", title);
+                    self.queue.clear();
+                    self.play_track(track).await;
+                    match self.sc.get_related_tracks(track_id, 15).await {
+                        Ok(related) => {
+                            for t in related {
+                                if t.id != track_id {
+                                    self.queue.push_back(t);
+                                }
+                            }
+                            self.status_message = format!("📻 Station started for '{}' ({} related tracks queued)", title, self.queue.len());
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Station error: {}", e);
+                        }
+                    }
+                }
+                4 => {
+                    // 5. Dodaj do playlisty (Add to Playlist)
+                    if self.user_playlists.is_empty() {
+                        self.status_message = "No playlists found. Log in via [Shift+L] to access your playlists.".to_string();
+                    } else {
+                        menu.playlist_sub_menu = true;
+                        menu.playlist_selected = 0;
+                        self.track_menu = Some(menu);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     async fn toggle_setting(&mut self) {
         let selected = self.settings_list_state.selected().unwrap_or(0);
         match selected {
@@ -721,6 +861,7 @@ fn print_help() {
     println!("  1 / 2 / 3, TabSwitch between Playlists, Search, and Settings");
     println!("  /             Search tracks globally");
     println!("  Enter         Play selected track / Open playlist / Toggle setting");
+    println!("  Right / l / m Open Track Actions Menu (Queue, Station, Playlist)");
     println!("  p             Play entire playlist");
     println!("  s             Toggle Shuffle (randomizes playlist & queue)");
     println!("  a             Toggle Spotify-style Autoplay (infinite related tracks)");
@@ -729,7 +870,7 @@ fn print_help() {
     println!("  v             Toggle CAVA audio visualizer");
     println!("  Space         Pause / Play");
     println!("  n             Next track");
-    println!("  Left / Right  Seek -5s / +5s (or switch theme in Settings)");
+    println!("  Left / Right  Seek -5s / +5s (or switch theme / setting in Settings)");
     println!("  + / -         Volume up / down");
     println!("  Shift+L       Account Login / Logout");
     println!("  q             Quit");
@@ -1521,7 +1662,9 @@ async fn main() -> Result<()> {
                 Span::styled(" [Tab/1,2,3]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
                 Span::raw(" Tabs "),
                 Span::styled("[Enter]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
-                Span::raw(" Toggle "),
+                Span::raw(" Play/Toggle "),
+                Span::styled("[→/m]", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
+                Span::raw(" Menu "),
                 Span::styled("[t]", Style::default().fg(colors.secondary).add_modifier(Modifier::BOLD)),
                 Span::raw(" Theme "),
                 Span::styled("[b]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
@@ -1546,6 +1689,81 @@ async fn main() -> Result<()> {
             .style(if bg_color != Color::Reset { Style::default().bg(bg_color) } else { Style::default() });
 
             f.render_widget(footer, chunks[3]);
+
+            // 5. Floating Track Context Menu Modal
+            if let Some(ref menu) = app.track_menu {
+                let popup_width = 54.min(f.area().width.saturating_sub(4));
+                let popup_height = if menu.playlist_sub_menu {
+                    (app.user_playlists.len() as u16 + 5).min(16).min(f.area().height.saturating_sub(4))
+                } else {
+                    (TRACK_MENU_ITEMS.len() as u16 + 4).min(f.area().height.saturating_sub(4))
+                };
+                let x = f.area().x + (f.area().width.saturating_sub(popup_width)) / 2;
+                let y = f.area().y + (f.area().height.saturating_sub(popup_height)) / 2;
+                let popup_area = Rect { x, y, width: popup_width, height: popup_height };
+
+                f.render_widget(Clear, popup_area);
+
+                let modal_bg = if bg_widget_color != Color::Reset {
+                    bg_widget_color
+                } else {
+                    Color::Rgb(24, 27, 44)
+                };
+
+                if menu.playlist_sub_menu {
+                    let items: Vec<ListItem> = app.user_playlists.iter().enumerate().map(|(idx, pl)| {
+                        let is_sel = idx == menu.playlist_selected;
+                        let icon = if is_sel { "▶ " } else { "  " };
+                        let style = if is_sel {
+                            Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(colors.text)
+                        };
+                        ListItem::new(Line::from(vec![
+                            Span::styled(icon, style),
+                            Span::styled(format!("{}. ", idx + 1), style),
+                            Span::styled(truncate_str(&pl.title, 30), style),
+                            Span::styled(format!(" ({} tracks)", pl.track_count), Style::default().fg(colors.warning)),
+                        ]))
+                    }).collect();
+
+                    let list = List::new(items)
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title(format!(" 📁 Add to Playlist: '{}' ", truncate_str(&menu.track.title, 20)))
+                                .border_type(BorderType::Rounded)
+                                .border_style(Style::default().fg(colors.accent))
+                                .style(Style::default().bg(modal_bg))
+                        );
+                    f.render_widget(list, popup_area);
+                } else {
+                    let items: Vec<ListItem> = TRACK_MENU_ITEMS.iter().enumerate().map(|(idx, &title)| {
+                        let is_sel = idx == menu.selected;
+                        let icon = if is_sel { "▶ " } else { "  " };
+                        let style = if is_sel {
+                            Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(colors.text)
+                        };
+                        ListItem::new(Line::from(vec![
+                            Span::styled(icon, style),
+                            Span::styled(title, style),
+                        ]))
+                    }).collect();
+
+                    let list = List::new(items)
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title(format!(" 🎵 Track Actions: '{}' ", truncate_str(&menu.track.title, 22)))
+                                .border_type(BorderType::Rounded)
+                                .border_style(Style::default().fg(colors.primary))
+                                .style(Style::default().bg(modal_bg))
+                        );
+                    f.render_widget(list, popup_area);
+                }
+            }
         })?;
 
         let refresh_dur = if app.cava_enabled && !state.paused && app.current_track.is_some() {
@@ -1623,6 +1841,49 @@ async fn main() -> Result<()> {
 
 async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     let state_volume = app.player.state.read().await.volume;
+
+    // Handle track actions context menu when open
+    if app.track_menu.is_some() {
+        match key.code {
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('q') => {
+                let is_submenu = app.track_menu.as_ref().map_or(false, |m| m.playlist_sub_menu);
+                if is_submenu {
+                    if let Some(ref mut m) = app.track_menu {
+                        m.playlist_sub_menu = false;
+                    }
+                } else {
+                    app.close_track_menu();
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let is_submenu = app.track_menu.as_ref().map_or(false, |m| m.playlist_sub_menu);
+                if is_submenu {
+                    let len = app.user_playlists.len();
+                    if let Some(ref mut m) = app.track_menu {
+                        m.playlist_prev(len);
+                    }
+                } else if let Some(ref mut m) = app.track_menu {
+                    m.prev();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let is_submenu = app.track_menu.as_ref().map_or(false, |m| m.playlist_sub_menu);
+                if is_submenu {
+                    let len = app.user_playlists.len();
+                    if let Some(ref mut m) = app.track_menu {
+                        m.playlist_next(len);
+                    }
+                } else if let Some(ref mut m) = app.track_menu {
+                    m.next();
+                }
+            }
+            KeyCode::Enter => {
+                app.execute_track_menu_action().await;
+            }
+            _ => {}
+        }
+        return false;
+    }
 
     match app.input_mode {
         InputMode::Searching => match key.code {
@@ -1757,6 +2018,21 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             KeyCode::Char('v') => {
                 app.toggle_cava().await;
             }
+            KeyCode::Char('m') => {
+                if app.active_tab == ActiveTab::Search {
+                    if let Some(i) = app.search_list_state.selected() {
+                        if let Some(track) = app.search_results.get(i).cloned() {
+                            app.open_track_menu(track);
+                        }
+                    }
+                } else if app.active_tab == ActiveTab::Playlists && app.view_state == ViewState::PlaylistDetail {
+                    if let Some(i) = app.track_list_state.selected() {
+                        if let Some(track) = app.playlist_tracks.get(i).cloned() {
+                            app.open_track_menu(track);
+                        }
+                    }
+                }
+            }
             KeyCode::Right | KeyCode::Char('l') => {
                 if app.active_tab == ActiveTab::Settings {
                     let selected = app.settings_list_state.selected().unwrap_or(0);
@@ -1766,6 +2042,29 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                         app.toggle_theme_background();
                     } else {
                         app.toggle_setting().await;
+                    }
+                } else if app.active_tab == ActiveTab::Search {
+                    if let Some(i) = app.search_list_state.selected() {
+                        if let Some(track) = app.search_results.get(i).cloned() {
+                            app.open_track_menu(track);
+                        }
+                    }
+                } else if app.active_tab == ActiveTab::Playlists {
+                    match app.view_state {
+                        ViewState::PlaylistList => {
+                            if let Some(i) = app.playlist_list_state.selected() {
+                                if let Some(pl) = app.user_playlists.get(i).cloned() {
+                                    app.open_playlist(pl).await;
+                                }
+                            }
+                        }
+                        ViewState::PlaylistDetail => {
+                            if let Some(i) = app.track_list_state.selected() {
+                                if let Some(track) = app.playlist_tracks.get(i).cloned() {
+                                    app.open_track_menu(track);
+                                }
+                            }
+                        }
                     }
                 } else {
                     let _ = app.player.seek(5.0).await;

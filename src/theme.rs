@@ -93,10 +93,10 @@ impl ThemeName {
                 highlight_bg: Color::Rgb(43, 51, 82),    // #2b3352
                 highlight_fg: Color::Rgb(125, 207, 255),
                 gauge_bg: Color::Rgb(21, 24, 40),
-                gauge_fg: Color::Rgb(76, 217, 123),
-                visualizer_low: Color::Rgb(76, 217, 123),
-                visualizer_mid: Color::Rgb(224, 175, 104),
-                visualizer_high: Color::Rgb(247, 118, 142),
+                gauge_fg: Color::Rgb(125, 207, 255),
+                visualizer_low: Color::Rgb(125, 207, 255),
+                visualizer_mid: Color::Rgb(187, 154, 247),
+                visualizer_high: Color::Rgb(255, 121, 198),
             },
             ThemeName::CatppuccinMocha => ThemeColors {
                 name: "Catppuccin Mocha",
@@ -116,10 +116,10 @@ impl ThemeName {
                 highlight_bg: Color::Rgb(49, 50, 68),    // Surface0
                 highlight_fg: Color::Rgb(203, 166, 247), // Mauve
                 gauge_bg: Color::Rgb(49, 50, 68),
-                gauge_fg: Color::Rgb(166, 227, 161),
-                visualizer_low: Color::Rgb(166, 227, 161),
-                visualizer_mid: Color::Rgb(249, 226, 175),
-                visualizer_high: Color::Rgb(243, 139, 168),
+                gauge_fg: Color::Rgb(137, 180, 250),
+                visualizer_low: Color::Rgb(137, 180, 250),
+                visualizer_mid: Color::Rgb(203, 166, 247),
+                visualizer_high: Color::Rgb(245, 194, 231),
             },
             ThemeName::Dracula => ThemeColors {
                 name: "Dracula",
@@ -139,9 +139,9 @@ impl ThemeName {
                 highlight_bg: Color::Rgb(68, 71, 90),    // Current line
                 highlight_fg: Color::Rgb(139, 233, 253), // Cyan
                 gauge_bg: Color::Rgb(40, 42, 54),
-                gauge_fg: Color::Rgb(80, 250, 123),
-                visualizer_low: Color::Rgb(80, 250, 123),
-                visualizer_mid: Color::Rgb(255, 184, 108),
+                gauge_fg: Color::Rgb(189, 147, 249),
+                visualizer_low: Color::Rgb(139, 233, 253),
+                visualizer_mid: Color::Rgb(189, 147, 249),
                 visualizer_high: Color::Rgb(255, 121, 198),
             },
             ThemeName::TokyoNight => ThemeColors {
@@ -164,7 +164,7 @@ impl ThemeName {
                 gauge_bg: Color::Rgb(30, 32, 48),
                 gauge_fg: Color::Rgb(122, 162, 247),
                 visualizer_low: Color::Rgb(125, 207, 255),
-                visualizer_mid: Color::Rgb(224, 175, 104),
+                visualizer_mid: Color::Rgb(187, 154, 247),
                 visualizer_high: Color::Rgb(247, 118, 142),
             },
             ThemeName::Nord => ThemeColors {
@@ -186,9 +186,9 @@ impl ThemeName {
                 highlight_fg: Color::Rgb(136, 192, 208),
                 gauge_bg: Color::Rgb(46, 52, 64),
                 gauge_fg: Color::Rgb(136, 192, 208),
-                visualizer_low: Color::Rgb(163, 190, 140),
-                visualizer_mid: Color::Rgb(235, 203, 139),
-                visualizer_high: Color::Rgb(191, 97, 106),
+                visualizer_low: Color::Rgb(136, 192, 208),
+                visualizer_mid: Color::Rgb(129, 161, 193),
+                visualizer_high: Color::Rgb(180, 142, 173),
             },
             ThemeName::Gruvbox => ThemeColors {
                 name: "Gruvbox Dark",
@@ -209,9 +209,9 @@ impl ThemeName {
                 highlight_fg: Color::Rgb(250, 189, 47),
                 gauge_bg: Color::Rgb(40, 40, 40),
                 gauge_fg: Color::Rgb(250, 189, 47),
-                visualizer_low: Color::Rgb(184, 187, 38),
-                visualizer_mid: Color::Rgb(254, 128, 25),
-                visualizer_high: Color::Rgb(251, 73, 52),
+                visualizer_low: Color::Rgb(142, 192, 124),
+                visualizer_mid: Color::Rgb(250, 189, 47),
+                visualizer_high: Color::Rgb(254, 128, 25),
             },
             ThemeName::Cyberpunk => ThemeColors {
                 name: "Cyberpunk",
@@ -231,7 +231,7 @@ impl ThemeName {
                 highlight_bg: Color::Rgb(58, 20, 95),    // Vivid Purple
                 highlight_fg: Color::Rgb(255, 230, 0),
                 gauge_bg: Color::Rgb(24, 10, 48),
-                gauge_fg: Color::Rgb(255, 0, 127),
+                gauge_fg: Color::Rgb(0, 240, 255),
                 visualizer_low: Color::Rgb(0, 240, 255),
                 visualizer_mid: Color::Rgb(255, 230, 0),
                 visualizer_high: Color::Rgb(255, 0, 127),
@@ -254,9 +254,9 @@ impl ThemeName {
                 highlight_bg: Color::Rgb(62, 61, 50),
                 highlight_fg: Color::Rgb(166, 226, 46),
                 gauge_bg: Color::Rgb(39, 40, 34),
-                gauge_fg: Color::Rgb(166, 226, 46),
-                visualizer_low: Color::Rgb(166, 226, 46),
-                visualizer_mid: Color::Rgb(230, 219, 116),
+                gauge_fg: Color::Rgb(102, 217, 239),
+                visualizer_low: Color::Rgb(102, 217, 239),
+                visualizer_mid: Color::Rgb(174, 129, 255),
                 visualizer_high: Color::Rgb(249, 38, 114),
             },
             ThemeName::System => ThemeColors {
@@ -277,10 +277,10 @@ impl ThemeName {
                 highlight_bg: Color::Blue,
                 highlight_fg: Color::White,
                 gauge_bg: Color::Reset,
-                gauge_fg: Color::Green,
-                visualizer_low: Color::Green,
-                visualizer_mid: Color::Yellow,
-                visualizer_high: Color::Magenta,
+                gauge_fg: Color::Cyan,
+                visualizer_low: Color::Cyan,
+                visualizer_mid: Color::Magenta,
+                visualizer_high: Color::LightMagenta,
             },
         }
     }
