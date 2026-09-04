@@ -113,11 +113,11 @@ impl TrackMenuState {
 }
 
 const TRACK_MENU_ITEMS: [&str; 5] = [
-    "▶  Play Now            (Воспроизвести сейчас)",
-    "⏭  Play Next           (Играть следующим)",
-    "➕ Dodaj do kolejki     (Добавить в очередь)",
-    "📻 Stacja               (Радио / похожее)",
-    "📁 Dodaj do playlisty   (Добавить в плейлист)",
+    "▶  Play Now",
+    "⏭  Play Next",
+    "➕ Add to Queue",
+    "📻 Start Station",
+    "📁 Add to Playlist",
 ];
 
 struct App {
@@ -1692,7 +1692,11 @@ async fn main() -> Result<()> {
 
             // 5. Floating Track Context Menu Modal
             if let Some(ref menu) = app.track_menu {
-                let popup_width = 54.min(f.area().width.saturating_sub(4));
+                let popup_width = if menu.playlist_sub_menu {
+                    54.min(f.area().width.saturating_sub(4))
+                } else {
+                    42.min(f.area().width.saturating_sub(4))
+                };
                 let popup_height = if menu.playlist_sub_menu {
                     (app.user_playlists.len() as u16 + 5).min(16).min(f.area().height.saturating_sub(4))
                 } else {
@@ -1756,7 +1760,7 @@ async fn main() -> Result<()> {
                         .block(
                             Block::default()
                                 .borders(Borders::ALL)
-                                .title(format!(" 🎵 Track Actions: '{}' ", truncate_str(&menu.track.title, 22)))
+                                .title(format!(" 🎵 Actions: '{}' ", truncate_str(&menu.track.title, 20)))
                                 .border_type(BorderType::Rounded)
                                 .border_style(Style::default().fg(colors.primary))
                                 .style(Style::default().bg(modal_bg))
