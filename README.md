@@ -1,9 +1,9 @@
-# 🎵 SoundRust v1.0
+# 🎵 SoundRust v1.1
 
 > A blazingly fast, lightweight SoundCloud terminal player written in Rust.  
 > Listen to SoundCloud without Chromium, Electron, or browser tabs eating your RAM.
 
-![Version](https://img.shields.io/badge/version-v1.0.0-green?style=flat-square)
+![Version](https://img.shields.io/badge/version-v1.1.0-green?style=flat-square)
 ![Rust](https://img.shields.io/badge/rust-2024_edition-orange?logo=rust&style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Linux-lightgrey?logo=linux&style=flat-square)
@@ -12,12 +12,15 @@
 
 ## ✨ Features
 
-- ⚡ **Zero Bloat:** Pure terminal UI powered by [Ratatui](https://github.com/ratatui/ratatui) and [crossterm](https://github.com/crossterm-rs/crossterm). Audio played via an optimized [mpv](https://mpv.io) backend.
+- ⚡ **Zero Bloat & Ultra Efficient:** Pure terminal UI powered by [Ratatui](https://github.com/ratatui/ratatui) and [crossterm](https://github.com/crossterm-rs/crossterm). Near-zero CPU idle consumption with dynamic refresh rate.
+- 🎨 **btop-Inspired Color Themes:** 8 curated color palettes: **Catppuccin Mocha**, **Dracula**, **Tokyo Night**, **Nord**, **Gruvbox**, **Cyberpunk**, **Monokai Pro**, and **Classic Default**. Cycle anytime with `t` or in Settings.
+- 📊 **Real-time CAVA Audio Visualizer:** Integrated multi-frequency equalizer rendered with 8-level Unicode blocks in 3 vertical rows with gradient frequency coloring (Bass, Mids, Treble). Toggle with `v` or in Settings.
+- 🔊 **Persistent Volume & Settings:** Your volume levels, chosen theme, visualizer state, autoplay, and covers settings are automatically saved and restored on startup.
 - 📻 **Spotify-style Autoplay:** When your playlist or track finishes, the player automatically queries SoundCloud's recommendation algorithms (`/related`) to queue up similar tracks infinitely.
 - 📁 **Personal Playlists & Library:** Log into your SoundCloud account to browse, search, and stream your personal playlists.
 - 🔀 **Smart Playlist Shuffle:** Shuffles tracks within your playlist first. Autoplay only starts when all songs from your playlist have been heard. Turning shuffle off restores the original track ordering.
 - 🖼️ **Album Art in MPRIS Desktop Widgets:** Automatically caches high-res (500x500) album artwork and feeds it to Linux desktop media widgets (KDE Plasma, GNOME, Waybar, Hyprland, Dunst, lockscreen) via `mpris:artUrl`.
-- ⚙️ **Interactive Settings Menu:** Built-in settings screen (`[3] ⚙️ Settings` or press `3`/`o`) to easily toggle cover art downloading, autoplay, shuffle, manage accounts, and purge cache.
+- ⚙️ **Interactive Settings Menu:** Built-in settings screen (`[3] ⚙️ Settings` or press `3`/`o`) to easily configure themes, visualizer, covers, autoplay, shuffle, and accounts.
 - 🐧 **Full Linux MPRIS v2 Desktop Integration:** Works out of the box with `playerctl`, media keys, KDE Plasma widgets, GNOME media controls, and lockscreen players.
 - 🔍 **Instant Search:** Find and stream any song, artist, or remix across all of SoundCloud in real-time.
 - 👤 **Guest Mode & Easy Auth:** Works out of the box in Guest mode without signing in. Login with 1 command (`sc-player login`) or auto-detect your session from Firefox.
@@ -101,10 +104,12 @@ sc-player status
 | `p` | Play entire playlist in queue |
 | `s` | Toggle **Shuffle** (randomize upcoming playlist tracks) |
 | `a` | Toggle **Autoplay** (Spotify-like infinite radio for similar music) |
+| `t` / `T` | Cycle **Theme** forwards / backwards (btop palettes) |
+| `v` | Toggle **CAVA Visualizer** on / off |
 | `Space` | Play / Pause |
 | `n` | Skip to next track |
-| `←` / `→` | Seek backwards / forwards (5 seconds) |
-| `+` / `-` | Increase / decrease volume |
+| `←` / `→` | Seek backwards / forwards (5 seconds) or switch theme in Settings |
+| `+` / `-` | Increase / decrease volume (persisted) |
 | `Shift + L` | Account sign in / sign out |
 | `Esc` / `Backspace` | Return to playlist list (from playlist detail) |
 | `q` | Quit player |

@@ -1,8 +1,11 @@
+mod cava;
 mod mpris;
 mod player;
 mod soundcloud;
+mod theme;
 
 use anyhow::Result;
+use cava::CavaManager;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -23,6 +26,7 @@ use std::collections::{HashSet, VecDeque};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Duration;
+use theme::ThemeName;
 use tokio::sync::mpsc;
 
 #[derive(PartialEq, Clone, Copy)]
@@ -32,7 +36,8 @@ enum ActiveTab {
     Settings,
 }
 
-const SETTINGS_COUNT: usize = 5;
+const SETTINGS_COUNT: usize = 7;
+const SUB_BLOCKS: [char; 9] = [' ', ' ', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 #[derive(PartialEq)]
 enum ViewState {
@@ -56,6 +61,9 @@ struct App {
     sc: SoundCloud,
     player: Player,
     mpris: Option<Arc<MprisManager>>,
+    cava: Arc<CavaManager>,
+    cava_enabled: bool,
+    theme: ThemeName,
     active_tab: ActiveTab,
     view_state: ViewState,
     search_query: String,
@@ -83,7 +91,12 @@ impl App {
     async fn new(event_tx: mpsc::Sender<()>, mpris: Option<Arc<MprisManager>>) -> Result<Self> {
         let sc = SoundCloud::new().await;
         let config = SoundCloud::load_config();
-        let player = Player::new(event_tx).await?;
+        let player = Player::new(event_tx, config.volume).await?;
+
+        let cava = Arc::new(CavaManager::new());
+        if config.cava_enabled {
+            cava.start().await;
+        }
 
         let mut search_list_state = ListState::default();
         search_list_state.select(Some(0));
@@ -101,6 +114,9 @@ impl App {
             sc,
             player,
             mpris,
+            cava,
+            cava_enabled: config.cava_enabled,
+            theme: config.theme,
             active_tab: ActiveTab::Playlists,
             view_state: ViewState::PlaylistList,
             search_query: String::new(),
@@ -451,10 +467,55 @@ impl App {
         self.input_mode = InputMode::Normal;
     }
 
+    fn cycle_theme(&mut self) {
+        self.theme = self.theme.next();
+        let mut config = soundcloud::SoundCloud::load_config();
+        config.theme = self.theme;
+        let _ = soundcloud::SoundCloud::save_config(&config);
+        self.status_message = format!("🎨 Theme switched to: {}", self.theme.colors().name);
+    }
+
+    fn prev_theme(&mut self) {
+        self.theme = self.theme.prev();
+        let mut config = soundcloud::SoundCloud::load_config();
+        config.theme = self.theme;
+        let _ = soundcloud::SoundCloud::save_config(&config);
+        self.status_message = format!("🎨 Theme switched to: {}", self.theme.colors().name);
+    }
+
+    async fn toggle_cava(&mut self) {
+        self.cava_enabled = !self.cava_enabled;
+        let mut config = soundcloud::SoundCloud::load_config();
+        config.cava_enabled = self.cava_enabled;
+        let _ = soundcloud::SoundCloud::save_config(&config);
+
+        if self.cava_enabled {
+            self.cava.start().await;
+            self.status_message = "📊 CAVA Audio Visualizer: ENABLED".to_string();
+        } else {
+            self.cava.stop().await;
+            self.status_message = "📊 CAVA Audio Visualizer: DISABLED".to_string();
+        }
+    }
+
+    fn save_volume(&mut self, vol: f64) {
+        let mut config = soundcloud::SoundCloud::load_config();
+        config.volume = vol.clamp(0.0, 100.0);
+        let _ = soundcloud::SoundCloud::save_config(&config);
+    }
+
     async fn toggle_setting(&mut self) {
         let selected = self.settings_list_state.selected().unwrap_or(0);
         match selected {
             0 => {
+                // UI Theme
+                self.cycle_theme();
+            }
+            1 => {
+                // CAVA Visualizer
+                self.toggle_cava().await;
+            }
+            2 => {
                 // Download Covers
                 self.download_covers = !self.download_covers;
                 let mut config = soundcloud::SoundCloud::load_config();
@@ -487,7 +548,7 @@ impl App {
                     }
                 }
             }
-            1 => {
+            3 => {
                 // Autoplay
                 self.autoplay = !self.autoplay;
                 let mut config = soundcloud::SoundCloud::load_config();
@@ -498,15 +559,15 @@ impl App {
                     if self.autoplay { "ON (infinite similar music!)" } else { "OFF" }
                 );
             }
-            2 => {
+            4 => {
                 // Shuffle
                 self.toggle_shuffle();
             }
-            3 => {
+            5 => {
                 // Account
                 self.toggle_account().await;
             }
-            4 => {
+            6 => {
                 // Clear Cover Cache
                 let cache_dir = soundcloud::covers_cache_dir();
                 let mut count = 0;
@@ -627,7 +688,7 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
 }
 
 fn print_help() {
-    println!("SoundRust v1.0 - Fast SoundCloud Terminal Player\n");
+    println!("SoundRust v1.1 - Fast SoundCloud Terminal Player\n");
     println!("USAGE:");
     println!("  sc-player               Launch the TUI music player");
     println!("  sc-player login [TOKEN] Authenticate with your SoundCloud account");
@@ -635,15 +696,17 @@ fn print_help() {
     println!("  sc-player status        Check authentication status and current user");
     println!("  sc-player help          Print this help message\n");
     println!("CONTROLS IN PLAYER:");
-    println!("  1 / 2, Tab    Switch between My Playlists and Search");
+    println!("  1 / 2 / 3, TabSwitch between Playlists, Search, and Settings");
     println!("  /             Search tracks globally");
-    println!("  Enter         Play selected track / Open playlist");
+    println!("  Enter         Play selected track / Open playlist / Toggle setting");
     println!("  p             Play entire playlist");
     println!("  s             Toggle Shuffle (randomizes playlist & queue)");
     println!("  a             Toggle Spotify-style Autoplay (infinite related tracks)");
+    println!("  t / T         Cycle color themes (btop-inspired palettes)");
+    println!("  v             Toggle CAVA audio visualizer");
     println!("  Space         Pause / Play");
     println!("  n             Next track");
-    println!("  Left / Right  Seek -5s / +5s");
+    println!("  Left / Right  Seek -5s / +5s (or switch theme in Settings)");
     println!("  + / -         Volume up / down");
     println!("  Shift+L       Account Login / Logout");
     println!("  q             Quit");
@@ -739,8 +802,10 @@ async fn main() -> Result<()> {
     let (event_tx, mut event_rx) = mpsc::channel::<()>(16);
     let (mpris_tx, mut mpris_rx) = mpsc::channel::<MprisAction>(32);
 
+    let config = SoundCloud::load_config();
+
     // Initialize MPRIS D-Bus Service for system controls and playerctl
-    let mpris = match MprisManager::start(mpris_tx).await {
+    let mpris = match MprisManager::start(mpris_tx, config.volume).await {
         Ok(m) => Some(Arc::new(m)),
         Err(_) => None,
     };
@@ -769,9 +834,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    let mut render_interval = tokio::time::interval(Duration::from_millis(250));
-    render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     loop {
         let state = app.player.state.read().await.clone();
 
@@ -780,58 +842,61 @@ async fn main() -> Result<()> {
             m.update_playback_state(state.paused, state.position, state.volume).await;
         }
 
+        let colors = app.theme.colors();
+        let now_playing_height = if app.cava_enabled { 6 } else { 4 };
+
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3), // Header & Tabs
-                    Constraint::Min(8),    // Main content & Queue
-                    Constraint::Length(4), // Now playing bar
-                    Constraint::Length(1), // Footer hotkeys
+                    Constraint::Length(3),                  // Header & Tabs
+                    Constraint::Min(6),                     // Main content & Queue
+                    Constraint::Length(now_playing_height), // Now playing bar
+                    Constraint::Length(1),                  // Footer hotkeys
                 ])
                 .split(f.area());
 
             // 1. Header
             let user_badge = if let Some(ref prof) = app.sc.user_profile {
-                Span::styled(format!(" [👤 {}] ", prof.username), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                Span::styled(format!(" [👤 {}] ", prof.username), Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [👤 Guest] ", Style::default().fg(Color::DarkGray))
+                Span::styled(" [👤 Guest] ", Style::default().fg(colors.text_dim))
             };
 
             let auth_btn = if app.sc.oauth_token.is_some() {
-                Span::styled(" [Shift+L] Logout ", Style::default().fg(Color::LightRed))
+                Span::styled(" [Shift+L] Logout ", Style::default().fg(colors.error))
             } else {
-                Span::styled(" [Shift+L] Login ", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD))
+                Span::styled(" [Shift+L] Login ", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
             };
 
             let tab_playlists = if app.active_tab == ActiveTab::Playlists {
-                Span::styled(" [1] 📁 My Playlists ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+                Span::styled(" [1] 📁 Playlists ", Style::default().fg(Color::Black).bg(colors.primary).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [1] 📁 My Playlists ", Style::default().fg(Color::Gray))
+                Span::styled(" [1] 📁 Playlists ", Style::default().fg(colors.text_dim))
             };
 
             let tab_search = if app.active_tab == ActiveTab::Search {
-                Span::styled(" [2] 🔍 Search ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+                Span::styled(" [2] 🔍 Search ", Style::default().fg(Color::Black).bg(colors.primary).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [2] 🔍 Search ", Style::default().fg(Color::Gray))
+                Span::styled(" [2] 🔍 Search ", Style::default().fg(colors.text_dim))
             };
 
             let tab_settings = if app.active_tab == ActiveTab::Settings {
-                Span::styled(" [3] ⚙️ Settings ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+                Span::styled(" [3] ⚙️ Settings ", Style::default().fg(Color::Black).bg(colors.primary).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [3] ⚙️ Settings ", Style::default().fg(Color::Gray))
+                Span::styled(" [3] ⚙️ Settings ", Style::default().fg(colors.text_dim))
             };
 
             let shuffle_badge = if app.shuffle {
-                Span::styled(" [🔀 SHUFFLE: ON] ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+                Span::styled(" [🔀 SHUFFLE: ON] ", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [SHUFFLE: OFF] ", Style::default().fg(Color::DarkGray))
+                Span::styled(" [SHUFFLE: OFF] ", Style::default().fg(colors.text_dim))
             };
 
             let autoplay_badge = if app.autoplay {
-                Span::styled(" [📻 AUTOPLAY: ON] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                Span::styled(" [📻 AUTOPLAY: ON] ", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [AUTOPLAY: OFF] ", Style::default().fg(Color::DarkGray))
+                Span::styled(" [AUTOPLAY: OFF] ", Style::default().fg(colors.text_dim))
             };
 
             let search_prompt = if app.input_mode == InputMode::Searching {
@@ -841,7 +906,7 @@ async fn main() -> Result<()> {
             };
 
             let header = Paragraph::new(Line::from(vec![
-                Span::styled(" SoundRust ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(" SoundRust ", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
                 user_badge,
                 auth_btn,
                 tab_playlists,
@@ -851,11 +916,11 @@ async fn main() -> Result<()> {
                 tab_settings,
                 shuffle_badge,
                 autoplay_badge,
-                Span::styled(format!("Vol: {:.0}% ", state.volume), Style::default().fg(Color::Yellow)),
+                Span::styled(format!("Vol: {:.0}% ", state.volume), Style::default().fg(colors.warning)),
                 Span::raw("| "),
-                Span::styled(search_prompt, if app.input_mode == InputMode::Searching { Style::default().fg(Color::White).bg(Color::Blue) } else { Style::default().fg(Color::DarkGray) }),
+                Span::styled(search_prompt, if app.input_mode == InputMode::Searching { Style::default().fg(Color::White).bg(colors.primary) } else { Style::default().fg(colors.text_dim) }),
             ]))
-            .block(Block::default().borders(Borders::ALL).title(" SoundRust v1.0 ").border_type(BorderType::Rounded));
+            .block(Block::default().borders(Borders::ALL).title(format!(" SoundRust v1.1 [{}] ", colors.title)).border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)));
 
             f.render_widget(header, chunks[0]);
 
@@ -879,36 +944,48 @@ async fn main() -> Result<()> {
 
                     let items = vec![
                         ListItem::new(Line::from(vec![
-                            Span::styled(" 🖼️  Download Covers for MPRIS Widget    ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                            Span::styled(" 🎨  UI Theme (btop palettes)            ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
+                            Span::styled(format!("[ {} ]", colors.name), Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
+                        ])),
+                        ListItem::new(Line::from(vec![
+                            Span::styled(" 📊  CAVA Audio Visualizer               ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
+                            if app.cava_enabled {
+                                Span::styled("[ ENABLED ]", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
+                            } else {
+                                Span::styled("[ DISABLED ]", Style::default().fg(colors.error))
+                            },
+                        ])),
+                        ListItem::new(Line::from(vec![
+                            Span::styled(" 🖼️  Download Covers for MPRIS Widget    ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
                             if app.download_covers {
-                                Span::styled("[ ENABLED ]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                                Span::styled("[ ENABLED ]", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
                             } else {
-                                Span::styled("[ DISABLED ]", Style::default().fg(Color::Red))
+                                Span::styled("[ DISABLED ]", Style::default().fg(colors.error))
                             },
                         ])),
                         ListItem::new(Line::from(vec![
-                            Span::styled(" 📻  Spotify-style Autoplay              ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                            Span::styled(" 📻  Spotify-style Autoplay              ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
                             if app.autoplay {
-                                Span::styled("[ ENABLED ]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                                Span::styled("[ ENABLED ]", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
                             } else {
-                                Span::styled("[ DISABLED ]", Style::default().fg(Color::Red))
+                                Span::styled("[ DISABLED ]", Style::default().fg(colors.error))
                             },
                         ])),
                         ListItem::new(Line::from(vec![
-                            Span::styled(" 🔀  Smart Playlist Shuffle              ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                            Span::styled(" 🔀  Smart Playlist Shuffle              ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
                             if app.shuffle {
-                                Span::styled("[ ENABLED ]", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+                                Span::styled("[ ENABLED ]", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD))
                             } else {
-                                Span::styled("[ DISABLED ]", Style::default().fg(Color::DarkGray))
+                                Span::styled("[ DISABLED ]", Style::default().fg(colors.text_dim))
                             },
                         ])),
                         ListItem::new(Line::from(vec![
-                            Span::styled(" 👤  SoundCloud Account                  ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                            Span::styled(format!("[ {} ]", account_status), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                            Span::styled(" 👤  SoundCloud Account                  ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
+                            Span::styled(format!("[ {} ]", account_status), Style::default().fg(colors.warning).add_modifier(Modifier::BOLD)),
                         ])),
                         ListItem::new(Line::from(vec![
-                            Span::styled(" 🗑️  Purge Cover Art Cache               ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                            Span::styled(format!("[ {} cached files ]", cached_count), Style::default().fg(Color::Cyan)),
+                            Span::styled(" 🗑️  Purge Cover Art Cache               ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
+                            Span::styled(format!("[ {} cached files ]", cached_count), Style::default().fg(colors.secondary)),
                         ])),
                     ];
 
@@ -916,10 +993,11 @@ async fn main() -> Result<()> {
                         .block(
                             Block::default()
                                 .borders(Borders::ALL)
-                                .title(" ⚙️ Settings (Press [Enter] to toggle / activate) ")
-                                .border_type(BorderType::Rounded),
+                                .title(" ⚙️ Settings (Press [Enter] to toggle / cycle) ")
+                                .border_type(BorderType::Rounded)
+                                .border_style(Style::default().fg(colors.border)),
                         )
-                        .highlight_style(Style::default().bg(Color::Rgb(40, 60, 100)).add_modifier(Modifier::BOLD))
+                        .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
                         .highlight_symbol("▶ ");
 
                     f.render_stateful_widget(list, main_chunks[0], &mut app.settings_list_state);
@@ -928,25 +1006,25 @@ async fn main() -> Result<()> {
                     if app.sc.oauth_token.is_none() {
                         let text = vec![
                             Line::from(""),
-                            Line::from(Span::styled("   🔒 Guest Mode (Not Authenticated)", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+                            Line::from(Span::styled("   🔒 Guest Mode (Not Authenticated)", Style::default().fg(colors.warning).add_modifier(Modifier::BOLD))),
                             Line::from(""),
-                            Line::from(Span::styled("   To view and stream your personal SoundCloud playlists:", Style::default().fg(Color::White))),
+                            Line::from(Span::styled("   To view and stream your personal SoundCloud playlists:", Style::default().fg(colors.text))),
                             Line::from(""),
                             Line::from(vec![
-                                Span::styled("   1. Press ", Style::default().fg(Color::Gray)),
-                                Span::styled("[Shift+L]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                                Span::styled(" to auto-login from your local Firefox browser session, OR", Style::default().fg(Color::Gray)),
+                                Span::styled("   1. Press ", Style::default().fg(colors.text_dim)),
+                                Span::styled("[Shift+L]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
+                                Span::styled(" to auto-login from your local Firefox browser session, OR", Style::default().fg(colors.text_dim)),
                             ]),
                             Line::from(vec![
-                                Span::styled("   2. Run ", Style::default().fg(Color::Gray)),
-                                Span::styled("'sc-player login'", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                                Span::styled(" in any terminal to sign in manually.", Style::default().fg(Color::Gray)),
+                                Span::styled("   2. Run ", Style::default().fg(colors.text_dim)),
+                                Span::styled("'sc-player login'", Style::default().fg(colors.warning).add_modifier(Modifier::BOLD)),
+                                Span::styled(" in any terminal to sign in manually.", Style::default().fg(colors.text_dim)),
                             ]),
                             Line::from(""),
-                            Line::from(Span::styled("   💡 You can already search and stream ANY track right now via [2] 🔍 Search (or press [/])!", Style::default().fg(Color::Green))),
+                            Line::from(Span::styled("   💡 You can already search and stream ANY track right now via [2] 🔍 Search (or press [/])!", Style::default().fg(colors.success))),
                         ];
                         let widget = Paragraph::new(text)
-                            .block(Block::default().borders(Borders::ALL).title(" 📁 Your Playlists ").border_type(BorderType::Rounded));
+                            .block(Block::default().borders(Borders::ALL).title(" 📁 Your Playlists ").border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)));
                         f.render_widget(widget, main_chunks[0]);
                     } else {
                         match app.view_state {
@@ -957,9 +1035,9 @@ async fn main() -> Result<()> {
                                     .enumerate()
                                     .map(|(idx, p)| {
                                         let content = Line::from(vec![
-                                            Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(Color::DarkGray)),
-                                            Span::styled(format!("{:<40} ", truncate_str(&p.title, 40)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                                            Span::styled(format!("({} tracks)", p.track_count), Style::default().fg(Color::Yellow)),
+                                            Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(colors.text_dim)),
+                                            Span::styled(format!("{:<40} ", truncate_str(&p.title, 40)), Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
+                                            Span::styled(format!("({} tracks)", p.track_count), Style::default().fg(colors.warning)),
                                         ]);
                                         ListItem::new(content)
                                     })
@@ -972,8 +1050,8 @@ async fn main() -> Result<()> {
                                 };
 
                                 let list = List::new(items)
-                                    .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded))
-                                    .highlight_style(Style::default().bg(Color::Rgb(40, 60, 100)).add_modifier(Modifier::BOLD))
+                                    .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)))
+                                    .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
                                     .highlight_symbol("▶ ");
 
                                 f.render_stateful_widget(list, main_chunks[0], &mut app.playlist_list_state);
@@ -986,10 +1064,10 @@ async fn main() -> Result<()> {
                                     .map(|(idx, t)| {
                                         let dur = format_duration(t.duration as f64 / 1000.0);
                                         let content = Line::from(vec![
-                                            Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(Color::DarkGray)),
-                                            Span::styled(format!("{:<40} ", truncate_str(&t.title, 40)), Style::default().fg(Color::White)),
-                                            Span::styled(format!("by {:<18} ", truncate_str(&t.user.username, 18)), Style::default().fg(Color::Yellow)),
-                                            Span::styled(dur, Style::default().fg(Color::Cyan)),
+                                            Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(colors.text_dim)),
+                                            Span::styled(format!("{:<40} ", truncate_str(&t.title, 40)), Style::default().fg(colors.text)),
+                                            Span::styled(format!("by {:<18} ", truncate_str(&t.user.username, 18)), Style::default().fg(colors.secondary)),
+                                            Span::styled(dur, Style::default().fg(colors.primary)),
                                         ]);
                                         ListItem::new(content)
                                     })
@@ -997,8 +1075,8 @@ async fn main() -> Result<()> {
 
                                 let title = format!(" 📁 Playlist: '{}' (Press [p] to play whole playlist, [Esc] back) ", app.selected_playlist_title);
                                 let list = List::new(items)
-                                    .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded))
-                                    .highlight_style(Style::default().bg(Color::Rgb(40, 60, 100)).add_modifier(Modifier::BOLD))
+                                    .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)))
+                                    .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
                                     .highlight_symbol("▶ ");
 
                                 f.render_stateful_widget(list, main_chunks[0], &mut app.track_list_state);
@@ -1014,10 +1092,10 @@ async fn main() -> Result<()> {
                         .map(|(idx, t)| {
                             let dur = format_duration(t.duration as f64 / 1000.0);
                             let content = Line::from(vec![
-                                Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(Color::DarkGray)),
-                                Span::styled(format!("{:<40} ", truncate_str(&t.title, 40)), Style::default().fg(Color::White)),
-                                Span::styled(format!("by {:<18} ", truncate_str(&t.user.username, 18)), Style::default().fg(Color::Yellow)),
-                                Span::styled(dur, Style::default().fg(Color::Cyan)),
+                                Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(colors.text_dim)),
+                                Span::styled(format!("{:<40} ", truncate_str(&t.title, 40)), Style::default().fg(colors.text)),
+                                Span::styled(format!("by {:<18} ", truncate_str(&t.user.username, 18)), Style::default().fg(colors.secondary)),
+                                Span::styled(dur, Style::default().fg(colors.primary)),
                             ]);
                             ListItem::new(content)
                         })
@@ -1030,8 +1108,8 @@ async fn main() -> Result<()> {
                     };
 
                     let list = List::new(items)
-                        .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded))
-                        .highlight_style(Style::default().bg(Color::Rgb(40, 60, 100)).add_modifier(Modifier::BOLD))
+                        .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)))
+                        .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
                         .highlight_symbol("▶ ");
 
                     f.render_stateful_widget(list, main_chunks[0], &mut app.search_list_state);
@@ -1044,73 +1122,135 @@ async fn main() -> Result<()> {
                 let selected = app.settings_list_state.selected().unwrap_or(0);
                 let (title, details) = match selected {
                     0 => (
+                        " 🎨 UI Theme Settings ",
+                        vec![
+                            Line::from(Span::styled(format!("UI Theme: {}", colors.name), Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))),
+                            Line::from(""),
+                            Line::from(Span::styled("8 btop-inspired color palettes:", Style::default().fg(colors.text))),
+                            Line::from(Span::styled(" • Catppuccin Mocha (Soft modern pastel)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Dracula (Classic purple dark)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Tokyo Night (Deep neon blue)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Nord (Arctic frost & teal)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Gruvbox (Retro warm groove)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Cyberpunk (High-contrast neon)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Monokai Pro (Iconic vibrant)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Classic Default (Standard terminal)", Style::default().fg(colors.text_dim))),
+                            Line::from(""),
+                            Line::from(Span::styled("Active Palette Preview:", Style::default().fg(colors.text))),
+                            Line::from(vec![
+                                Span::styled(" ■ Border ", Style::default().fg(colors.border)),
+                                Span::styled(" ■ Primary ", Style::default().fg(colors.primary)),
+                                Span::styled(" ■ Accent ", Style::default().fg(colors.accent)),
+                                Span::styled(" ■ Success ", Style::default().fg(colors.success)),
+                                Span::styled(" ■ Warning ", Style::default().fg(colors.warning)),
+                                Span::styled(" ■ Error ", Style::default().fg(colors.error)),
+                            ]),
+                            Line::from(""),
+                            Line::from(Span::styled("💡 Press [Enter], [t/T] or [Left/Right] to cycle theme.", Style::default().fg(colors.warning))),
+                        ],
+                    ),
+                    1 => (
+                        " 📊 CAVA Visualizer Settings ",
+                        vec![
+                            Line::from(Span::styled("Console-based Audio Visualizer (CAVA)", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))),
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::raw("Status: "),
+                                if app.cava_enabled {
+                                    Span::styled("ENABLED", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
+                                } else {
+                                    Span::styled("DISABLED", Style::default().fg(colors.error).add_modifier(Modifier::BOLD))
+                                },
+                            ]),
+                            Line::from(""),
+                            Line::from(if let Some(path) = CavaManager::find_cava_binary() {
+                                Span::styled(format!("CAVA binary: {}", path.display()), Style::default().fg(colors.success))
+                            } else {
+                                Span::styled("⚠️ CAVA not found in PATH or ~/.local/bin/cava", Style::default().fg(colors.warning))
+                            }),
+                            Line::from(""),
+                            Line::from(Span::styled("Real-time audio frequency equalizer in Now Playing bar:", Style::default().fg(colors.text))),
+                            Line::from(vec![
+                                Span::styled("  ▲ Upper row: Peaks / Treble ", Style::default().fg(colors.visualizer_high)),
+                            ]),
+                            Line::from(vec![
+                                Span::styled("  ■ Middle row: Vocals / Midtones ", Style::default().fg(colors.visualizer_mid)),
+                            ]),
+                            Line::from(vec![
+                                Span::styled("  ▼ Lower row: Bass / Sub-bass ", Style::default().fg(colors.visualizer_low)),
+                            ]),
+                            Line::from(""),
+                            Line::from(Span::styled("💡 Press [Enter] or [v] to toggle visualizer.", Style::default().fg(colors.warning))),
+                        ],
+                    ),
+                    2 => (
                         " 🖼️ Cover Art Settings ",
                         vec![
-                            Line::from(Span::styled("Download Covers for MPRIS Widget", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                            Line::from(Span::styled("Download Covers for MPRIS Widget", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))),
                             Line::from(""),
                             Line::from(vec![
                                 Span::raw("Status: "),
                                 if app.download_covers {
-                                    Span::styled("ENABLED", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                                    Span::styled("ENABLED", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
                                 } else {
-                                    Span::styled("DISABLED", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                                    Span::styled("DISABLED", Style::default().fg(colors.error).add_modifier(Modifier::BOLD))
                                 },
                             ]),
                             Line::from(""),
-                            Line::from("When enabled, SoundRust automatically downloads high-res (500x500) album art for the playing track to display in:"),
+                            Line::from(Span::styled("When enabled, SoundRust automatically downloads high-res (500x500) album art for the playing track to display in:", Style::default().fg(colors.text))),
                             Line::from(""),
-                            Line::from(Span::styled(" • KDE Plasma Media Widget", Style::default().fg(Color::White))),
-                            Line::from(Span::styled(" • GNOME media controls & lockscreen", Style::default().fg(Color::White))),
-                            Line::from(Span::styled(" • Waybar / Hyprland media modules", Style::default().fg(Color::White))),
-                            Line::from(Span::styled(" • Dunst / Mako / SwayNC popups", Style::default().fg(Color::White))),
+                            Line::from(Span::styled(" • KDE Plasma Media Widget", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • GNOME media controls & lockscreen", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Waybar / Hyprland media modules", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Dunst / Mako / SwayNC popups", Style::default().fg(colors.text_dim))),
                             Line::from(""),
-                            Line::from(Span::styled("📁 Storage: ~/.cache/sc-player/covers/", Style::default().fg(Color::DarkGray))),
+                            Line::from(Span::styled("📁 Storage: ~/.cache/sc-player/covers/", Style::default().fg(colors.text_dim))),
                             Line::from(""),
-                            Line::from(Span::styled("💡 Press [Enter] to toggle.", Style::default().fg(Color::Yellow))),
+                            Line::from(Span::styled("💡 Press [Enter] to toggle.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    1 => (
+                    3 => (
                         " 📻 Autoplay Settings ",
                         vec![
-                            Line::from(Span::styled("Spotify-style Infinite Autoplay", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))),
+                            Line::from(Span::styled("Spotify-style Infinite Autoplay", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))),
                             Line::from(""),
                             Line::from(vec![
                                 Span::raw("Status: "),
                                 if app.autoplay {
-                                    Span::styled("ENABLED", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                                    Span::styled("ENABLED", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
                                 } else {
-                                    Span::styled("DISABLED", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                                    Span::styled("DISABLED", Style::default().fg(colors.error).add_modifier(Modifier::BOLD))
                                 },
                             ]),
                             Line::from(""),
-                            Line::from("When your playlist or queue ends, SoundRust automatically queries SoundCloud recommendations (/related) to queue up similar tracks indefinitely."),
+                            Line::from(Span::styled("When your playlist or queue ends, SoundRust automatically queries SoundCloud recommendations (/related) to queue up similar tracks indefinitely.", Style::default().fg(colors.text))),
                             Line::from(""),
-                            Line::from(Span::styled("💡 Press [Enter] or [a] to toggle.", Style::default().fg(Color::Yellow))),
+                            Line::from(Span::styled("💡 Press [Enter] or [a] to toggle.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    2 => (
+                    4 => (
                         " 🔀 Shuffle Settings ",
                         vec![
-                            Line::from(Span::styled("Smart Playlist Shuffle", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))),
+                            Line::from(Span::styled("Smart Playlist Shuffle", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD))),
                             Line::from(""),
                             Line::from(vec![
                                 Span::raw("Status: "),
                                 if app.shuffle {
-                                    Span::styled("ENABLED", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+                                    Span::styled("ENABLED", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD))
                                 } else {
-                                    Span::styled("DISABLED", Style::default().fg(Color::DarkGray))
+                                    Span::styled("DISABLED", Style::default().fg(colors.text_dim))
                                 },
                             ]),
                             Line::from(""),
-                            Line::from("Shuffles remaining tracks within your active playlist. Autoplay only begins after all tracks from the playlist are played."),
+                            Line::from(Span::styled("Shuffles remaining tracks within your active playlist. Autoplay only begins after all tracks from the playlist are played.", Style::default().fg(colors.text))),
                             Line::from(""),
-                            Line::from(Span::styled("💡 Press [Enter] or [s] to toggle.", Style::default().fg(Color::Yellow))),
+                            Line::from(Span::styled("💡 Press [Enter] or [s] to toggle.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    3 => (
+                    5 => (
                         " 👤 Account Settings ",
                         vec![
-                            Line::from(Span::styled("SoundCloud Account", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+                            Line::from(Span::styled("SoundCloud Account", Style::default().fg(colors.warning).add_modifier(Modifier::BOLD))),
                             Line::from(""),
                             Line::from(if let Some(ref prof) = app.sc.user_profile {
                                 format!("Logged in as @{} (ID: {})", prof.username, prof.id)
@@ -1118,28 +1258,28 @@ async fn main() -> Result<()> {
                                 "Currently in Guest Mode (unauthenticated)".to_string()
                             }),
                             Line::from(""),
-                            Line::from("Logging in grants access to your personal playlists and likes."),
+                            Line::from(Span::styled("Logging in grants access to your personal playlists and likes.", Style::default().fg(colors.text))),
                             Line::from(""),
-                            Line::from(Span::styled("💡 Press [Enter] or [Shift+L] to log in / out.", Style::default().fg(Color::Yellow))),
+                            Line::from(Span::styled("💡 Press [Enter] or [Shift+L] to log in / out.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    4 => (
+                    6 => (
                         " 🗑️ Cache Settings ",
                         vec![
-                            Line::from(Span::styled("Purge Cover Art Cache", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                            Line::from(Span::styled("Purge Cover Art Cache", Style::default().fg(colors.secondary).add_modifier(Modifier::BOLD))),
                             Line::from(""),
                             Line::from(format!("Currently {} cached cover images on disk.", cached_count)),
                             Line::from(""),
-                            Line::from("Deletes cached .jpg images from ~/.cache/sc-player/covers/ to free up disk space."),
+                            Line::from(Span::styled("Deletes cached .jpg images from ~/.cache/sc-player/covers/ to free up disk space.", Style::default().fg(colors.text))),
                             Line::from(""),
-                            Line::from(Span::styled("💡 Press [Enter] to delete cache.", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))),
+                            Line::from(Span::styled("💡 Press [Enter] to delete cache.", Style::default().fg(colors.error).add_modifier(Modifier::BOLD))),
                         ],
                     ),
                     _ => (" ⚙️ Details ", vec![]),
                 };
 
                 let widget = Paragraph::new(details)
-                    .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded));
+                    .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)));
                 f.render_widget(widget, main_chunks[1]);
             } else {
                 // Right Pane: Upcoming Queue
@@ -1150,8 +1290,8 @@ async fn main() -> Result<()> {
                     .take(15)
                     .map(|(idx, t)| {
                         let content = Line::from(vec![
-                            Span::styled(format!("{}. ", idx + 1), Style::default().fg(Color::DarkGray)),
-                            Span::styled(truncate_str(&t.title, 22), Style::default().fg(Color::Gray)),
+                            Span::styled(format!("{}. ", idx + 1), Style::default().fg(colors.text_dim)),
+                            Span::styled(truncate_str(&t.title, 22), Style::default().fg(colors.text)),
                         ]);
                         ListItem::new(content)
                     })
@@ -1159,7 +1299,7 @@ async fn main() -> Result<()> {
 
                 let queue_title = format!(" 📻 Upcoming Queue ({}) ", app.queue.len());
                 let queue_list = List::new(queue_items)
-                    .block(Block::default().borders(Borders::ALL).title(queue_title).border_type(BorderType::Rounded));
+                    .block(Block::default().borders(Borders::ALL).title(queue_title).border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)));
 
                 f.render_widget(queue_list, main_chunks[1]);
             }
@@ -1180,43 +1320,104 @@ async fn main() -> Result<()> {
 
             let time_str = format!("{} / {}", format_duration(state.position), format_duration(state.duration));
 
-            let gauge = Gauge::default()
-                .block(Block::default().borders(Borders::ALL).title(format!(" {} ", track_info)).border_type(BorderType::Rounded))
-                .gauge_style(Style::default().fg(Color::Green).bg(Color::Rgb(30, 30, 30)))
-                .percent(percent)
-                .label(Span::styled(time_str, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
+            let outer_block = Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", track_info))
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(colors.border_active));
 
-            f.render_widget(gauge, chunks[2]);
+            if app.cava_enabled {
+                let inner = outer_block.inner(chunks[2]);
+                f.render_widget(outer_block, chunks[2]);
+
+                let inner_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1), // Progress Gauge
+                        Constraint::Length(3), // 3-tier CAVA visualizer
+                    ])
+                    .split(inner);
+
+                let gauge = Gauge::default()
+                    .gauge_style(Style::default().fg(colors.gauge_fg).bg(colors.gauge_bg))
+                    .percent(percent)
+                    .label(Span::styled(time_str, Style::default().fg(colors.text).add_modifier(Modifier::BOLD)));
+                f.render_widget(gauge, inner_chunks[0]);
+
+                let vis_width = inner_chunks[1].width as usize;
+                let is_playing = !state.paused && app.current_track.is_some();
+                let bars = app.cava.get_bars(vis_width, is_playing, state.position);
+
+                let line_high: String = bars.iter().map(|&v| {
+                    if v >= 24 { '█' }
+                    else if v > 16 { SUB_BLOCKS[(v - 16) as usize] }
+                    else { ' ' }
+                }).collect();
+
+                let line_mid: String = bars.iter().map(|&v| {
+                    if v >= 16 { '█' }
+                    else if v > 8 { SUB_BLOCKS[(v - 8) as usize] }
+                    else { ' ' }
+                }).collect();
+
+                let line_low: String = bars.iter().map(|&v| {
+                    if v >= 8 { '█' }
+                    else if v > 0 { SUB_BLOCKS[v as usize] }
+                    else { ' ' }
+                }).collect();
+
+                let vis_widget = Paragraph::new(vec![
+                    Line::from(Span::styled(line_high, Style::default().fg(colors.visualizer_high))),
+                    Line::from(Span::styled(line_mid, Style::default().fg(colors.visualizer_mid))),
+                    Line::from(Span::styled(line_low, Style::default().fg(colors.visualizer_low))),
+                ]);
+                f.render_widget(vis_widget, inner_chunks[1]);
+            } else {
+                let gauge = Gauge::default()
+                    .block(outer_block)
+                    .gauge_style(Style::default().fg(colors.gauge_fg).bg(colors.gauge_bg))
+                    .percent(percent)
+                    .label(Span::styled(time_str, Style::default().fg(colors.text).add_modifier(Modifier::BOLD)));
+                f.render_widget(gauge, chunks[2]);
+            }
 
             // 4. Footer controls help
             let footer = Paragraph::new(Line::from(vec![
-                Span::styled(" [Tab/1,2,3]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(" [Tab/1,2,3]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
                 Span::raw(" Tabs "),
-                Span::styled("[Enter]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(" Select/Toggle "),
-                Span::styled("[p]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(" Play All "),
-                Span::styled("[s]", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                Span::styled("[Enter]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
+                Span::raw(" Toggle "),
+                Span::styled("[t]", Style::default().fg(colors.secondary).add_modifier(Modifier::BOLD)),
+                Span::raw(" Theme "),
+                Span::styled("[v]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
+                Span::raw(" CAVA "),
+                Span::styled("[s]", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
                 Span::raw(" Shuffle "),
-                Span::styled("[a]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled("[a]", Style::default().fg(colors.success).add_modifier(Modifier::BOLD)),
                 Span::raw(" Autoplay "),
-                Span::styled("[Space]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("[Space]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
                 Span::raw(" Pause "),
-                Span::styled("[n]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("[n]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
                 Span::raw(" Next "),
-                Span::styled("[Shift+L]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled("[Shift+L]", Style::default().fg(colors.warning).add_modifier(Modifier::BOLD)),
                 Span::raw(" Account "),
-                Span::styled("[q]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled("[q]", Style::default().fg(colors.error).add_modifier(Modifier::BOLD)),
                 Span::raw(" Quit "),
-                Span::styled(format!(" | {}", app.status_message), Style::default().fg(Color::Yellow)),
+                Span::styled(format!(" | {}", app.status_message), Style::default().fg(colors.warning)),
             ]))
             .alignment(Alignment::Left);
 
             f.render_widget(footer, chunks[3]);
         })?;
 
+        let refresh_dur = if app.cava_enabled && !state.paused && app.current_track.is_some() {
+            Duration::from_millis(40)
+        } else {
+            Duration::from_millis(200)
+        };
+
         tokio::select! {
-            _ = render_interval.tick() => {}
+            _ = tokio::time::sleep(refresh_dur) => {}
             Some(_) = event_rx.recv() => {
                 app.next_track().await;
             }
@@ -1244,7 +1445,9 @@ async fn main() -> Result<()> {
                         let _ = app.player.seek(delta).await;
                     }
                     MprisAction::SetVolume(vol) => {
+                        let vol = vol.clamp(0.0, 100.0);
                         let _ = app.player.set_volume(vol).await;
+                        app.save_volume(vol);
                     }
                     MprisAction::ToggleShuffle => {
                         app.toggle_shuffle();
@@ -1270,6 +1473,9 @@ async fn main() -> Result<()> {
         }
     }
 
+    let final_vol = app.player.state.read().await.volume;
+    app.save_volume(final_vol);
+    app.cava.stop().await;
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -1401,19 +1607,48 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                     if app.autoplay { "ON (infinite similar music!)" } else { "OFF" }
                 );
             }
+            KeyCode::Char('t') => {
+                app.cycle_theme();
+            }
+            KeyCode::Char('T') => {
+                app.prev_theme();
+            }
+            KeyCode::Char('v') => {
+                app.toggle_cava().await;
+            }
             KeyCode::Right | KeyCode::Char('l') => {
-                let _ = app.player.seek(5.0).await;
+                if app.active_tab == ActiveTab::Settings {
+                    let selected = app.settings_list_state.selected().unwrap_or(0);
+                    if selected == 0 {
+                        app.cycle_theme();
+                    } else {
+                        app.toggle_setting().await;
+                    }
+                } else {
+                    let _ = app.player.seek(5.0).await;
+                }
             }
             KeyCode::Left | KeyCode::Char('h') => {
-                let _ = app.player.seek(-5.0).await;
+                if app.active_tab == ActiveTab::Settings {
+                    let selected = app.settings_list_state.selected().unwrap_or(0);
+                    if selected == 0 {
+                        app.prev_theme();
+                    } else {
+                        app.toggle_setting().await;
+                    }
+                } else {
+                    let _ = app.player.seek(-5.0).await;
+                }
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                let vol = state_volume + 5.0;
+                let vol = (state_volume + 5.0).clamp(0.0, 100.0);
                 let _ = app.player.set_volume(vol).await;
+                app.save_volume(vol);
             }
             KeyCode::Char('-') => {
-                let vol = state_volume - 5.0;
+                let vol = (state_volume - 5.0).clamp(0.0, 100.0);
                 let _ = app.player.set_volume(vol).await;
+                app.save_volume(vol);
             }
             KeyCode::Char('L') => {
                 app.toggle_account().await;

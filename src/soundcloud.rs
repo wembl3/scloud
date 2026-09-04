@@ -100,8 +100,14 @@ struct RawPlaylistResponse {
     pub tracks: Vec<serde_json::Value>,
 }
 
+use crate::theme::ThemeName;
+
 fn default_true() -> bool {
     true
+}
+
+fn default_volume() -> f64 {
+    85.0
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -111,6 +117,12 @@ pub struct Config {
     pub download_covers: bool,
     #[serde(default = "default_true")]
     pub autoplay: bool,
+    #[serde(default = "default_true")]
+    pub cava_enabled: bool,
+    #[serde(default)]
+    pub theme: ThemeName,
+    #[serde(default = "default_volume")]
+    pub volume: f64,
 }
 
 impl Default for Config {
@@ -119,6 +131,9 @@ impl Default for Config {
             oauth_token: None,
             download_covers: true,
             autoplay: true,
+            cava_enabled: true,
+            theme: ThemeName::CatppuccinMocha,
+            volume: 85.0,
         }
     }
 }
@@ -607,5 +622,8 @@ mod tests {
         assert_eq!(config.oauth_token, Some("my-secret-token".to_string()));
         assert!(config.download_covers);
         assert!(config.autoplay);
+        assert!(config.cava_enabled);
+        assert_eq!(config.theme, ThemeName::CatppuccinMocha);
+        assert_eq!(config.volume, 85.0);
     }
 }

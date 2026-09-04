@@ -52,7 +52,8 @@ impl Drop for Player {
 }
 
 impl Player {
-    pub async fn new(event_tx: mpsc::Sender<()>) -> Result<Self> {
+    pub async fn new(event_tx: mpsc::Sender<()>, initial_volume: f64) -> Result<Self> {
+        let initial_vol = initial_volume.clamp(0.0, 100.0);
         let socket_path = format!("/tmp/sc_player_mpv_{}.sock", std::process::id());
         let _ = std::fs::remove_file(&socket_path);
 
@@ -62,7 +63,7 @@ impl Player {
             .arg("--idle=yes")
             .arg(format!("--input-ipc-server={}", socket_path))
             .arg("--ao=pipewire,pulse,alsa")
-            .arg("--volume=85")
+            .arg(format!("--volume={:.1}", initial_vol))
             .arg("--cache=yes")
             .arg("--demuxer-max-bytes=50M")
             .arg("--demuxer-readahead-secs=30")
@@ -91,7 +92,7 @@ impl Player {
 
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<PlayerCommand>(64);
         let state = Arc::new(RwLock::new(PlaybackState {
-            volume: 85.0,
+            volume: initial_vol,
             idle: true,
             ..Default::default()
         }));

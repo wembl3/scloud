@@ -249,7 +249,8 @@ pub struct MprisManager {
 }
 
 impl MprisManager {
-    pub async fn start(action_tx: mpsc::Sender<MprisAction>) -> Result<Self> {
+    pub async fn start(action_tx: mpsc::Sender<MprisAction>, initial_volume: f64) -> Result<Self> {
+        let initial_vol = initial_volume.clamp(0.0, 100.0);
         let state = MprisSharedState {
             title: Arc::new(RwLock::new("No track".to_string())),
             artist: Arc::new(RwLock::new("SoundCloud".to_string())),
@@ -258,7 +259,7 @@ impl MprisManager {
             is_paused: Arc::new(AtomicBool::new(false)),
             is_playing: Arc::new(AtomicBool::new(false)),
             shuffle: Arc::new(AtomicBool::new(false)),
-            volume: Arc::new(RwLock::new(85.0)),
+            volume: Arc::new(RwLock::new(initial_vol)),
             art_url: Arc::new(RwLock::new(None)),
         };
 
