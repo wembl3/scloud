@@ -1,0 +1,21 @@
+[package]
+name = "sc_player"
+version = "0.1.0"
+edition = "2024"
+description = "Fast, lightweight terminal SoundCloud player with Spotify-like autoplay and MPRIS system media controls"
+license = "MIT"
+keywords = ["soundcloud", "tui", "music", "mpris", "player"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.10"
+anyhow = "1.0"
+crossterm = "0.28"
+ratatui = "0.29"
+mpris-server = { version = "0.10.0", features = ["tokio"] }
+rand = "0.10.2"
+

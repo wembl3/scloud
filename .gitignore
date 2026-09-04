@@ -1,0 +1,6 @@
+/target
+*.sock
+*.sqlite*
+.env*
+config.json
+scratch/
