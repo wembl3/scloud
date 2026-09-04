@@ -82,6 +82,16 @@ struct LibraryResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct LikeItem {
+    pub track: Option<Track>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LikesResponse {
+    pub collection: Vec<LikeItem>,
+}
+
+#[derive(Debug, Deserialize)]
 struct SearchResponse {
     pub collection: Vec<Track>,
 }
@@ -203,6 +213,31 @@ impl SoundCloud {
             fs::create_dir_all(parent)?;
         }
         fs::write(path, serde_json::to_string_pretty(config)?)?;
+        Ok(())
+    }
+
+    pub fn favorites_path() -> PathBuf {
+        dirs_config().join("sc-player").join("favorites.json")
+    }
+
+    pub fn load_favorites() -> Vec<Track> {
+        let path = Self::favorites_path();
+        if path.exists() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(tracks) = serde_json::from_str::<Vec<Track>>(&content) {
+                    return tracks;
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn save_favorites(tracks: &[Track]) -> Result<()> {
+        let path = Self::favorites_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_string_pretty(tracks)?)?;
         Ok(())
     }
 
@@ -360,6 +395,32 @@ for db_src in candidates:
             .collect();
 
         Ok(playlists)
+    }
+
+    /// Fetch user's liked tracks from SoundCloud API
+    pub async fn fetch_user_likes(&self) -> Result<Vec<Track>> {
+        let profile = self.user_profile.as_ref().ok_or_else(|| anyhow!("Not logged in"))?;
+        let url = format!(
+            "https://api-v2.soundcloud.com/users/{}/likes?client_id={}&limit=50",
+            profile.id, self.client_id
+        );
+
+        let resp = self
+            .client
+            .get(&url)
+            .headers(self.auth_headers())
+            .send()
+            .await?
+            .json::<LikesResponse>()
+            .await?;
+
+        let tracks: Vec<Track> = resp
+            .collection
+            .into_iter()
+            .filter_map(|item| item.track)
+            .collect();
+
+        Ok(tracks)
     }
 
     /// Fetch full tracks for a playlist (resolving any stub IDs)

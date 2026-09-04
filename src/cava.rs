@@ -196,6 +196,30 @@ impl CavaManager {
             res
         }
     }
+
+    pub fn get_braille_wave(&self, char_width: usize, is_playing: bool, position_sec: f64) -> String {
+        if char_width == 0 {
+            return String::new();
+        }
+        let col_count = char_width * 2;
+        let bars = self.get_bars(col_count, is_playing, position_sec);
+        let mut s = String::with_capacity(char_width);
+        for i in 0..char_width {
+            let idx = i * 2;
+            let b1 = if idx < bars.len() { ((bars[idx] as u32 * 4) / MAX_CAVA_RANGE as u32) as u8 } else { 0 };
+            let b2 = if idx + 1 < bars.len() { ((bars[idx + 1] as u32 * 4) / MAX_CAVA_RANGE as u32) as u8 } else { 0 };
+            s.push(braille_char(b1.min(4), b2.min(4)));
+        }
+        s
+    }
+}
+
+pub fn braille_char(h1: u8, h2: u8) -> char {
+    const COL1: [u32; 5] = [0, 0x40, 0x44, 0x46, 0x47];
+    const COL2: [u32; 5] = [0, 0x80, 0xA0, 0xB0, 0xB8];
+    let v1 = COL1[(h1 as usize).min(4)];
+    let v2 = COL2[(h2 as usize).min(4)];
+    std::char::from_u32(0x2800 + v1 + v2).unwrap_or(' ')
 }
 
 #[cfg(test)]
@@ -232,5 +256,14 @@ mod tests {
         for &val in &bars_playing {
             assert!(val <= MAX_CAVA_RANGE, "Bar value {} exceeded max range {}", val, MAX_CAVA_RANGE);
         }
+    }
+
+    #[test]
+    fn test_get_braille_wave() {
+        let manager = CavaManager::new();
+        let wave = manager.get_braille_wave(20, true, 2.0);
+        assert_eq!(wave.chars().count(), 20);
+        let empty_wave = manager.get_braille_wave(0, true, 2.0);
+        assert_eq!(empty_wave.len(), 0);
     }
 }

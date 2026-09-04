@@ -32,12 +32,12 @@ use tokio::sync::mpsc;
 #[derive(PartialEq, Clone, Copy)]
 enum ActiveTab {
     Playlists,
+    Favorites,
     Search,
     Settings,
 }
 
 const SETTINGS_COUNT: usize = 8;
-const SUB_BLOCKS: [char; 9] = [' ', ' ', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 #[derive(PartialEq)]
 enum ViewState {
@@ -76,7 +76,7 @@ impl TrackMenuState {
     }
 
     fn next(&mut self) {
-        if self.selected + 1 < TRACK_MENU_ITEMS.len() {
+        if self.selected + 1 < 6 {
             self.selected += 1;
         } else {
             self.selected = 0;
@@ -85,7 +85,7 @@ impl TrackMenuState {
 
     fn prev(&mut self) {
         if self.selected == 0 {
-            self.selected = TRACK_MENU_ITEMS.len() - 1;
+            self.selected = 5;
         } else {
             self.selected -= 1;
         }
@@ -112,14 +112,6 @@ impl TrackMenuState {
     }
 }
 
-const TRACK_MENU_ITEMS: [&str; 5] = [
-    "▶  Play Now",
-    "⏭  Play Next",
-    "➕ Add to Queue",
-    "📻 Start Station",
-    "📁 Add to Playlist",
-];
-
 struct App {
     sc: SoundCloud,
     player: Player,
@@ -132,11 +124,13 @@ struct App {
     view_state: ViewState,
     search_query: String,
     search_results: Vec<Track>,
+    favorites: Vec<Track>,
     user_playlists: Vec<Playlist>,
     selected_playlist_title: String,
     playlist_tracks: Vec<Track>,
     active_playlist: Option<PlaylistContext>,
     search_list_state: ListState,
+    favorites_list_state: ListState,
     playlist_list_state: ListState,
     track_list_state: ListState,
     settings_list_state: ListState,
@@ -176,6 +170,12 @@ impl App {
         let mut settings_list_state = ListState::default();
         settings_list_state.select(Some(0));
 
+        let mut favorites_list_state = ListState::default();
+        let favorites = soundcloud::SoundCloud::load_favorites();
+        if !favorites.is_empty() {
+            favorites_list_state.select(Some(0));
+        }
+
         let mut app = Self {
             sc,
             player,
@@ -188,11 +188,13 @@ impl App {
             view_state: ViewState::PlaylistList,
             search_query: String::new(),
             search_results: Vec::new(),
+            favorites,
             user_playlists: Vec::new(),
             selected_playlist_title: String::new(),
             playlist_tracks: Vec::new(),
             active_playlist: None,
             search_list_state,
+            favorites_list_state,
             playlist_list_state,
             track_list_state,
             settings_list_state,
@@ -210,8 +212,11 @@ impl App {
         };
 
         if let Some(ref prof) = app.sc.user_profile {
-            app.status_message = format!("Welcome back, {}! Loading your playlists...", prof.username);
+            app.status_message = format!("Welcome back, {}! Loading your library...", prof.username);
             app.refresh_playlists().await;
+            if app.favorites.is_empty() {
+                app.sync_soundcloud_likes().await;
+            }
         } else {
             app.active_tab = ActiveTab::Search;
             app.status_message = "Ready in Guest mode. Press [/] to search, [Shift+L] to log in.".to_string();
@@ -587,6 +592,78 @@ impl App {
         let _ = soundcloud::SoundCloud::save_config(&config);
     }
 
+    pub fn is_favorite(&self, track_id: u64) -> bool {
+        self.favorites.iter().any(|t| t.id == track_id)
+    }
+
+    pub fn toggle_favorite(&mut self, track: Track) -> bool {
+        let id = track.id;
+        let title = track.title.clone();
+        if let Some(pos) = self.favorites.iter().position(|t| t.id == id) {
+            self.favorites.remove(pos);
+            let _ = soundcloud::SoundCloud::save_favorites(&self.favorites);
+            self.status_message = format!("🤍 Removed '{}' from Favorites", truncate_str(&title, 32));
+            if !self.favorites.is_empty() {
+                let sel = self.favorites_list_state.selected().unwrap_or(0);
+                if sel >= self.favorites.len() {
+                    self.favorites_list_state.select(Some(self.favorites.len() - 1));
+                }
+            } else {
+                self.favorites_list_state.select(None);
+            }
+            false
+        } else {
+            self.favorites.insert(0, track);
+            let _ = soundcloud::SoundCloud::save_favorites(&self.favorites);
+            self.status_message = format!("❤️ Added '{}' to Favorites", truncate_str(&title, 32));
+            if self.favorites_list_state.selected().is_none() {
+                self.favorites_list_state.select(Some(0));
+            }
+            true
+        }
+    }
+
+    pub fn remove_favorite_at(&mut self, index: usize) {
+        if index < self.favorites.len() {
+            let removed = self.favorites.remove(index);
+            let _ = soundcloud::SoundCloud::save_favorites(&self.favorites);
+            self.status_message = format!("🤍 Removed '{}' from Favorites", truncate_str(&removed.title, 32));
+            if !self.favorites.is_empty() {
+                let next_idx = index.min(self.favorites.len() - 1);
+                self.favorites_list_state.select(Some(next_idx));
+            } else {
+                self.favorites_list_state.select(None);
+            }
+        }
+    }
+
+    pub async fn sync_soundcloud_likes(&mut self) {
+        if self.sc.oauth_token.is_none() {
+            self.status_message = "ℹ️ Log in ([Shift+L]) to sync likes from SoundCloud!".to_string();
+            return;
+        }
+        self.status_message = "🔄 Syncing likes from SoundCloud...".to_string();
+        match self.sc.fetch_user_likes().await {
+            Ok(sc_likes) => {
+                let mut added_count = 0;
+                for t in sc_likes {
+                    if !self.favorites.iter().any(|fav| fav.id == t.id) {
+                        self.favorites.push(t);
+                        added_count += 1;
+                    }
+                }
+                let _ = soundcloud::SoundCloud::save_favorites(&self.favorites);
+                if self.favorites_list_state.selected().is_none() && !self.favorites.is_empty() {
+                    self.favorites_list_state.select(Some(0));
+                }
+                self.status_message = format!("❤️ Synced with SoundCloud! {} new tracks added (total: {})", added_count, self.favorites.len());
+            }
+            Err(e) => {
+                self.status_message = format!("⚠️ Failed to fetch SoundCloud likes: {}", e);
+            }
+        }
+    }
+
     fn open_track_menu(&mut self, track: Track) {
         self.track_menu = Some(TrackMenuState::new(track));
     }
@@ -619,14 +696,18 @@ impl App {
                     self.status_message = format!("⏭️ Next up: {}", title);
                 }
                 2 => {
-                    // 3. Dodaj do kolejki (Add to Queue)
+                    // 3. Add to Queue
                     let title = menu.track.title.clone();
                     let pos = self.queue.len() + 1;
                     self.queue.push_back(menu.track);
                     self.status_message = format!("➕ Added '{}' to queue (#{})", title, pos);
                 }
                 3 => {
-                    // 4. Stacja (Station)
+                    // 4. Toggle Favorite (Add/Remove)
+                    self.toggle_favorite(menu.track);
+                }
+                4 => {
+                    // 5. Start Station
                     let track = menu.track;
                     let track_id = track.id;
                     let title = track.title.clone();
@@ -647,8 +728,8 @@ impl App {
                         }
                     }
                 }
-                4 => {
-                    // 5. Dodaj do playlisty (Add to Playlist)
+                5 => {
+                    // 6. Add to Playlist
                     if self.user_playlists.is_empty() {
                         self.status_message = "No playlists found. Log in via [Shift+L] to access your playlists.".to_string();
                     } else {
@@ -753,6 +834,13 @@ impl App {
                 let i = self.settings_list_state.selected().map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
                 self.settings_list_state.select(Some(i));
             }
+            ActiveTab::Favorites => {
+                let len = self.favorites.len();
+                if len > 0 {
+                    let i = self.favorites_list_state.selected().map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
+                    self.favorites_list_state.select(Some(i));
+                }
+            }
             ActiveTab::Search => {
                 let len = self.search_results.len();
                 if len > 0 {
@@ -787,6 +875,13 @@ impl App {
                 let len = SETTINGS_COUNT;
                 let i = self.settings_list_state.selected().map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
                 self.settings_list_state.select(Some(i));
+            }
+            ActiveTab::Favorites => {
+                let len = self.favorites.len();
+                if len > 0 {
+                    let i = self.favorites_list_state.selected().map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
+                    self.favorites_list_state.select(Some(i));
+                }
             }
             ActiveTab::Search => {
                 let len = self.search_results.len();
@@ -1012,7 +1107,7 @@ async fn main() -> Result<()> {
         }
 
         let colors = app.theme.colors();
-        let now_playing_height = if app.cava_enabled { 6 } else { 4 };
+        let now_playing_height = if app.cava_enabled { 5 } else { 4 };
 
         terminal.draw(|f| {
             let bg_color = if app.theme_background && app.theme != ThemeName::System {
@@ -1040,7 +1135,7 @@ async fn main() -> Result<()> {
                 ])
                 .split(f.area());
 
-            // 1. Header
+            // 1. Header with Account Status, Tabs & Search Bar
             let user_badge = if let Some(ref prof) = app.sc.user_profile {
                 Span::styled(format!(" [👤 {}] ", prof.username), Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
             } else {
@@ -1059,16 +1154,22 @@ async fn main() -> Result<()> {
                 Span::styled(" [1] 📁 Playlists ", Style::default().fg(colors.text_dim))
             };
 
-            let tab_search = if app.active_tab == ActiveTab::Search {
-                Span::styled(" [2] 🔍 Search ", Style::default().fg(Color::Black).bg(colors.primary).add_modifier(Modifier::BOLD))
+            let tab_favorites = if app.active_tab == ActiveTab::Favorites {
+                Span::styled(" [2] ❤️ Favorites ", Style::default().fg(Color::Black).bg(colors.primary).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [2] 🔍 Search ", Style::default().fg(colors.text_dim))
+                Span::styled(" [2] ❤️ Favorites ", Style::default().fg(colors.text_dim))
+            };
+
+            let tab_search = if app.active_tab == ActiveTab::Search {
+                Span::styled(" [3] 🔍 Search ", Style::default().fg(Color::Black).bg(colors.primary).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(" [3] 🔍 Search ", Style::default().fg(colors.text_dim))
             };
 
             let tab_settings = if app.active_tab == ActiveTab::Settings {
-                Span::styled(" [3] ⚙️ Settings ", Style::default().fg(Color::Black).bg(colors.primary).add_modifier(Modifier::BOLD))
+                Span::styled(" [4] ⚙️ Settings ", Style::default().fg(Color::Black).bg(colors.primary).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [3] ⚙️ Settings ", Style::default().fg(colors.text_dim))
+                Span::styled(" [4] ⚙️ Settings ", Style::default().fg(colors.text_dim))
             };
 
             let shuffle_badge = if app.shuffle {
@@ -1094,6 +1195,8 @@ async fn main() -> Result<()> {
                 user_badge,
                 auth_btn,
                 tab_playlists,
+                Span::raw(" "),
+                tab_favorites,
                 Span::raw(" "),
                 tab_search,
                 Span::raw(" "),
@@ -1279,9 +1382,11 @@ async fn main() -> Result<()> {
                                     .enumerate()
                                     .map(|(idx, t)| {
                                         let dur = format_duration(t.duration as f64 / 1000.0);
+                                        let fav_icon = if app.is_favorite(t.id) { "❤️ " } else { "   " };
                                         let content = Line::from(vec![
                                             Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(colors.text_dim)),
-                                            Span::styled(format!("{:<40} ", truncate_str(&t.title, 40)), Style::default().fg(colors.text)),
+                                            Span::styled(fav_icon, Style::default().fg(colors.accent)),
+                                            Span::styled(format!("{:<38} ", truncate_str(&t.title, 38)), Style::default().fg(colors.text)),
                                             Span::styled(format!("by {:<18} ", truncate_str(&t.user.username, 18)), Style::default().fg(colors.secondary)),
                                             Span::styled(dur, Style::default().fg(colors.primary)),
                                         ]);
@@ -1289,7 +1394,7 @@ async fn main() -> Result<()> {
                                     })
                                     .collect();
 
-                                let title = format!(" 📁 Playlist: '{}' (Press [p] to play whole playlist, [Esc] back) ", app.selected_playlist_title);
+                                let title = format!(" 📁 Playlist: '{}' (Press [p] to play whole playlist, [f] to favorite, [Esc] back) ", app.selected_playlist_title);
                                 let list = List::new(items)
                                     .block(
                                         Block::default()
@@ -1307,6 +1412,84 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                ActiveTab::Favorites => {
+                    if app.favorites.is_empty() {
+                        let text = vec![
+                            Line::from(""),
+                            Line::from(Span::styled("   ❤️ Your Favorites & Liked Tracks", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))),
+                            Line::from(""),
+                            Line::from(Span::styled("   No favorite tracks saved yet.", Style::default().fg(colors.text))),
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::styled("   1. Search tracks in ", Style::default().fg(colors.text_dim)),
+                                Span::styled("[3] 🔍 Search", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
+                                Span::styled(" and press ", Style::default().fg(colors.text_dim)),
+                                Span::styled("[f]", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
+                                Span::styled(" to favorite any track!", Style::default().fg(colors.text_dim)),
+                            ]),
+                            Line::from(vec![
+                                Span::styled("   2. Press ", Style::default().fg(colors.text_dim)),
+                                Span::styled("[→ / m]", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
+                                Span::styled(" on any track and select ", Style::default().fg(colors.text_dim)),
+                                Span::styled("'❤️ Add to Favorites'", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
+                                Span::styled(".", Style::default().fg(colors.text_dim)),
+                            ]),
+                            Line::from(vec![
+                                Span::styled("   3. Press ", Style::default().fg(colors.text_dim)),
+                                Span::styled("[r]", Style::default().fg(colors.warning).add_modifier(Modifier::BOLD)),
+                                Span::styled(" to sync / import your existing likes from SoundCloud!", Style::default().fg(colors.text_dim)),
+                            ]),
+                            Line::from(""),
+                            Line::from(Span::styled("   💾 Favorites are saved locally and persist across restarts!", Style::default().fg(colors.success))),
+                        ];
+                        let widget = Paragraph::new(text)
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .title(" ❤️ Favorites (Empty) ")
+                                    .border_type(BorderType::Rounded)
+                                    .border_style(Style::default().fg(colors.border))
+                                    .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
+                            );
+                        f.render_widget(widget, main_chunks[0]);
+                    } else {
+                        let items: Vec<ListItem> = app
+                            .favorites
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, t)| {
+                                let dur = format_duration(t.duration as f64 / 1000.0);
+                                let content = Line::from(vec![
+                                    Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(colors.text_dim)),
+                                    Span::styled("❤️ ", Style::default().fg(colors.accent)),
+                                    Span::styled(format!("{:<38} ", truncate_str(&t.title, 38)), Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
+                                    Span::styled(format!("by {:<18} ", truncate_str(&t.user.username, 18)), Style::default().fg(colors.secondary)),
+                                    Span::styled(dur, Style::default().fg(colors.primary)),
+                                ]);
+                                ListItem::new(content)
+                            })
+                            .collect();
+
+                        let title = format!(
+                            " ❤️ Favorites ({} tracks) - [Enter] Play, [p] Play All, [s] Shuffle, [f/d] Remove, [r] Sync ",
+                            app.favorites.len()
+                        );
+
+                        let list = List::new(items)
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .title(title)
+                                    .border_type(BorderType::Rounded)
+                                    .border_style(Style::default().fg(colors.border))
+                                    .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
+                            )
+                            .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
+                            .highlight_symbol("▶ ");
+
+                        f.render_stateful_widget(list, main_chunks[0], &mut app.favorites_list_state);
+                    }
+                }
                 ActiveTab::Search => {
                     let items: Vec<ListItem> = app
                         .search_results
@@ -1314,9 +1497,11 @@ async fn main() -> Result<()> {
                         .enumerate()
                         .map(|(idx, t)| {
                             let dur = format_duration(t.duration as f64 / 1000.0);
+                            let fav_icon = if app.is_favorite(t.id) { "❤️ " } else { "   " };
                             let content = Line::from(vec![
                                 Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(colors.text_dim)),
-                                Span::styled(format!("{:<40} ", truncate_str(&t.title, 40)), Style::default().fg(colors.text)),
+                                Span::styled(fav_icon, Style::default().fg(colors.accent)),
+                                Span::styled(format!("{:<38} ", truncate_str(&t.title, 38)), Style::default().fg(colors.text)),
                                 Span::styled(format!("by {:<18} ", truncate_str(&t.user.username, 18)), Style::default().fg(colors.secondary)),
                                 Span::styled(dur, Style::default().fg(colors.primary)),
                             ]);
@@ -1327,7 +1512,7 @@ async fn main() -> Result<()> {
                     let title = if app.is_loading {
                         " 🔍 Search Results [Loading...] "
                     } else {
-                        " 🔍 Search Results "
+                        " 🔍 Search Results (Press [Enter] to play, [f] to favorite, [→/m] menu) "
                     };
 
                     let list = List::new(items)
@@ -1607,7 +1792,7 @@ async fn main() -> Result<()> {
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(1), // Progress Gauge
-                        Constraint::Length(3), // 3-tier CAVA visualizer
+                        Constraint::Length(1), // Sleek Braille Wave
                     ])
                     .split(inner);
 
@@ -1619,31 +1804,13 @@ async fn main() -> Result<()> {
 
                 let vis_width = inner_chunks[1].width as usize;
                 let is_playing = !state.paused && app.current_track.is_some();
-                let bars = app.cava.get_bars(vis_width, is_playing, state.position);
+                let wave_str = app.cava.get_braille_wave(vis_width.saturating_sub(6), is_playing, state.position);
 
-                let line_high: String = bars.iter().map(|&v| {
-                    if v >= 24 { '█' }
-                    else if v > 16 { SUB_BLOCKS[(v - 16) as usize] }
-                    else { ' ' }
-                }).collect();
-
-                let line_mid: String = bars.iter().map(|&v| {
-                    if v >= 16 { '█' }
-                    else if v > 8 { SUB_BLOCKS[(v - 8) as usize] }
-                    else { ' ' }
-                }).collect();
-
-                let line_low: String = bars.iter().map(|&v| {
-                    if v >= 8 { '█' }
-                    else if v > 0 { SUB_BLOCKS[v as usize] }
-                    else { ' ' }
-                }).collect();
-
-                let mut vis_widget = Paragraph::new(vec![
-                    Line::from(Span::styled(line_high, Style::default().fg(colors.visualizer_high))),
-                    Line::from(Span::styled(line_mid, Style::default().fg(colors.visualizer_mid))),
-                    Line::from(Span::styled(line_low, Style::default().fg(colors.visualizer_low))),
-                ]);
+                let mut vis_widget = Paragraph::new(Line::from(vec![
+                    Span::styled(" ∿ ", Style::default().fg(colors.primary)),
+                    Span::styled(wave_str, Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
+                    Span::styled(" ∿ ", Style::default().fg(colors.primary)),
+                ]));
                 if bg_widget_color != Color::Reset {
                     vis_widget = vis_widget.style(Style::default().bg(bg_widget_color));
                 }
@@ -1659,10 +1826,12 @@ async fn main() -> Result<()> {
 
             // 4. Footer controls help
             let footer = Paragraph::new(Line::from(vec![
-                Span::styled(" [Tab/1,2,3]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
+                Span::styled(" [Tab/1-4]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
                 Span::raw(" Tabs "),
                 Span::styled("[Enter]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
-                Span::raw(" Play/Toggle "),
+                Span::raw(" Play "),
+                Span::styled("[f]", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
+                Span::raw(" Fav "),
                 Span::styled("[→/m]", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
                 Span::raw(" Menu "),
                 Span::styled("[t]", Style::default().fg(colors.secondary).add_modifier(Modifier::BOLD)),
@@ -1670,7 +1839,7 @@ async fn main() -> Result<()> {
                 Span::styled("[b]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
                 Span::raw(" BG "),
                 Span::styled("[v]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
-                Span::raw(" CAVA "),
+                Span::raw(" Wave "),
                 Span::styled("[s]", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
                 Span::raw(" Shuffle "),
                 Span::styled("[a]", Style::default().fg(colors.success).add_modifier(Modifier::BOLD)),
@@ -1692,15 +1861,25 @@ async fn main() -> Result<()> {
 
             // 5. Floating Track Context Menu Modal
             if let Some(ref menu) = app.track_menu {
+                let is_fav = app.is_favorite(menu.track.id);
+                let menu_items: [(&str, &str); 6] = [
+                    ("▶", "Play Now"),
+                    ("⏭", "Play Next"),
+                    ("➕", "Add to Queue"),
+                    if is_fav { ("🤍", "Remove from Favorites") } else { ("❤️", "Add to Favorites") },
+                    ("📻", "Start Station"),
+                    ("📁", "Add to Playlist"),
+                ];
+
                 let popup_width = if menu.playlist_sub_menu {
                     54.min(f.area().width.saturating_sub(4))
                 } else {
-                    42.min(f.area().width.saturating_sub(4))
+                    40.min(f.area().width.saturating_sub(4))
                 };
                 let popup_height = if menu.playlist_sub_menu {
-                    (app.user_playlists.len() as u16 + 5).min(16).min(f.area().height.saturating_sub(4))
+                    (app.user_playlists.len() as u16 + 4).min(16).min(f.area().height.saturating_sub(4))
                 } else {
-                    (TRACK_MENU_ITEMS.len() as u16 + 4).min(f.area().height.saturating_sub(4))
+                    (menu_items.len() as u16 + 2).min(f.area().height.saturating_sub(4))
                 };
                 let x = f.area().x + (f.area().width.saturating_sub(popup_width)) / 2;
                 let y = f.area().y + (f.area().height.saturating_sub(popup_height)) / 2;
@@ -1708,27 +1887,27 @@ async fn main() -> Result<()> {
 
                 f.render_widget(Clear, popup_area);
 
-                let modal_bg = if bg_widget_color != Color::Reset {
-                    bg_widget_color
+                let modal_bg = bg_widget_color;
+                let block_style = if modal_bg != Color::Reset {
+                    Style::default().bg(modal_bg)
                 } else {
-                    Color::Rgb(24, 27, 44)
+                    Style::default()
                 };
+
+                let inner_width = (popup_width as usize).saturating_sub(4);
 
                 if menu.playlist_sub_menu {
                     let items: Vec<ListItem> = app.user_playlists.iter().enumerate().map(|(idx, pl)| {
                         let is_sel = idx == menu.playlist_selected;
-                        let icon = if is_sel { "▶ " } else { "  " };
+                        let prefix = if is_sel { "❯ " } else { "  " };
+                        let line_str = format!("{}{}. {} ({} tracks)", prefix, idx + 1, truncate_str(&pl.title, 22), pl.track_count);
+                        let padded = format!("{:<width$}", line_str, width = inner_width);
                         let style = if is_sel {
                             Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(colors.text)
                         };
-                        ListItem::new(Line::from(vec![
-                            Span::styled(icon, style),
-                            Span::styled(format!("{}. ", idx + 1), style),
-                            Span::styled(truncate_str(&pl.title, 30), style),
-                            Span::styled(format!(" ({} tracks)", pl.track_count), Style::default().fg(colors.warning)),
-                        ]))
+                        ListItem::new(Span::styled(padded, style))
                     }).collect();
 
                     let list = List::new(items)
@@ -1738,22 +1917,21 @@ async fn main() -> Result<()> {
                                 .title(format!(" 📁 Add to Playlist: '{}' ", truncate_str(&menu.track.title, 20)))
                                 .border_type(BorderType::Rounded)
                                 .border_style(Style::default().fg(colors.accent))
-                                .style(Style::default().bg(modal_bg))
+                                .style(block_style)
                         );
                     f.render_widget(list, popup_area);
                 } else {
-                    let items: Vec<ListItem> = TRACK_MENU_ITEMS.iter().enumerate().map(|(idx, &title)| {
+                    let items: Vec<ListItem> = menu_items.iter().enumerate().map(|(idx, &(icon, label))| {
                         let is_sel = idx == menu.selected;
-                        let icon = if is_sel { "▶ " } else { "  " };
+                        let prefix = if is_sel { "❯ " } else { "  " };
+                        let line_str = format!("{}{:<2} {}", prefix, icon, label);
+                        let padded = format!("{:<width$}", line_str, width = inner_width);
                         let style = if is_sel {
                             Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(colors.text)
                         };
-                        ListItem::new(Line::from(vec![
-                            Span::styled(icon, style),
-                            Span::styled(title, style),
-                        ]))
+                        ListItem::new(Span::styled(padded, style))
                     }).collect();
 
                     let list = List::new(items)
@@ -1763,7 +1941,7 @@ async fn main() -> Result<()> {
                                 .title(format!(" 🎵 Actions: '{}' ", truncate_str(&menu.track.title, 20)))
                                 .border_type(BorderType::Rounded)
                                 .border_style(Style::default().fg(colors.primary))
-                                .style(Style::default().bg(modal_bg))
+                                .style(block_style)
                         );
                     f.render_widget(list, popup_area);
                 }
@@ -1911,18 +2089,30 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             }
             KeyCode::Tab => {
                 app.active_tab = match app.active_tab {
-                    ActiveTab::Playlists => ActiveTab::Search,
+                    ActiveTab::Playlists => ActiveTab::Favorites,
+                    ActiveTab::Favorites => ActiveTab::Search,
                     ActiveTab::Search => ActiveTab::Settings,
                     ActiveTab::Settings => ActiveTab::Playlists,
+                };
+            }
+            KeyCode::BackTab => {
+                app.active_tab = match app.active_tab {
+                    ActiveTab::Playlists => ActiveTab::Settings,
+                    ActiveTab::Favorites => ActiveTab::Playlists,
+                    ActiveTab::Search => ActiveTab::Favorites,
+                    ActiveTab::Settings => ActiveTab::Search,
                 };
             }
             KeyCode::Char('1') => {
                 app.active_tab = ActiveTab::Playlists;
             }
             KeyCode::Char('2') => {
+                app.active_tab = ActiveTab::Favorites;
+            }
+            KeyCode::Char('3') => {
                 app.active_tab = ActiveTab::Search;
             }
-            KeyCode::Char('3') | KeyCode::Char('o') => {
+            KeyCode::Char('4') | KeyCode::Char('o') => {
                 app.active_tab = ActiveTab::Settings;
             }
             KeyCode::Char('/') => {
@@ -1939,14 +2129,70 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 if app.active_tab == ActiveTab::Playlists && app.view_state == ViewState::PlaylistDetail {
                     app.view_state = ViewState::PlaylistList;
                     app.status_message = "Back to playlists list".to_string();
-                } else if app.active_tab == ActiveTab::Settings {
+                } else if app.active_tab != ActiveTab::Playlists {
                     app.active_tab = ActiveTab::Playlists;
+                }
+            }
+            KeyCode::Char('f') => {
+                match app.active_tab {
+                    ActiveTab::Search => {
+                        if let Some(i) = app.search_list_state.selected() {
+                            if let Some(track) = app.search_results.get(i).cloned() {
+                                app.toggle_favorite(track);
+                            }
+                        }
+                    }
+                    ActiveTab::Playlists => {
+                        if app.view_state == ViewState::PlaylistDetail {
+                            if let Some(i) = app.track_list_state.selected() {
+                                if let Some(track) = app.playlist_tracks.get(i).cloned() {
+                                    app.toggle_favorite(track);
+                                }
+                            }
+                        }
+                    }
+                    ActiveTab::Favorites => {
+                        if let Some(i) = app.favorites_list_state.selected() {
+                            app.remove_favorite_at(i);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                if app.active_tab == ActiveTab::Favorites {
+                    if let Some(i) = app.favorites_list_state.selected() {
+                        app.remove_favorite_at(i);
+                    }
+                }
+            }
+            KeyCode::Char('r') => {
+                if app.active_tab == ActiveTab::Favorites {
+                    app.sync_soundcloud_likes().await;
+                } else if app.active_tab == ActiveTab::Playlists {
+                    app.refresh_playlists().await;
                 }
             }
             KeyCode::Enter => {
                 match app.active_tab {
                     ActiveTab::Settings => {
                         app.toggle_setting().await;
+                    }
+                    ActiveTab::Favorites => {
+                        if let Some(i) = app.favorites_list_state.selected() {
+                            if let Some(track) = app.favorites.get(i).cloned() {
+                                app.selected_playlist_title = "❤️ Favorites".to_string();
+                                app.active_playlist = Some(PlaylistContext {
+                                    title: "❤️ Favorites".to_string(),
+                                    original_tracks: app.favorites.clone(),
+                                });
+                                app.queue.clear();
+                                for t in app.favorites.iter().skip(i + 1).cloned() {
+                                    app.queue.push_back(t);
+                                }
+                                app.play_track(track).await;
+                            }
+                        }
                     }
                     ActiveTab::Search => {
                         if let Some(i) = app.search_list_state.selected() {
@@ -1975,7 +2221,21 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 }
             }
             KeyCode::Char('p') => {
-                if app.active_tab == ActiveTab::Playlists {
+                if app.active_tab == ActiveTab::Favorites {
+                    if !app.favorites.is_empty() {
+                        app.selected_playlist_title = "❤️ Favorites".to_string();
+                        app.active_playlist = Some(PlaylistContext {
+                            title: "❤️ Favorites".to_string(),
+                            original_tracks: app.favorites.clone(),
+                        });
+                        app.queue.clear();
+                        for t in app.favorites.iter().skip(1).cloned() {
+                            app.queue.push_back(t);
+                        }
+                        let first = app.favorites[0].clone();
+                        app.play_track(first).await;
+                    }
+                } else if app.active_tab == ActiveTab::Playlists {
                     match app.view_state {
                         ViewState::PlaylistList => {
                             if let Some(i) = app.playlist_list_state.selected() {
@@ -1992,7 +2252,23 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 }
             }
             KeyCode::Char('s') => {
-                app.toggle_shuffle();
+                if app.active_tab == ActiveTab::Favorites && !app.favorites.is_empty() {
+                    app.selected_playlist_title = "❤️ Favorites (Shuffle)".to_string();
+                    let mut shuffled = app.favorites.clone();
+                    shuffle_slice(&mut shuffled);
+                    let first = shuffled.remove(0);
+                    app.active_playlist = Some(PlaylistContext {
+                        title: "❤️ Favorites".to_string(),
+                        original_tracks: app.favorites.clone(),
+                    });
+                    app.queue.clear();
+                    for t in shuffled {
+                        app.queue.push_back(t);
+                    }
+                    app.play_track(first).await;
+                } else {
+                    app.toggle_shuffle();
+                }
             }
             KeyCode::Char(' ') => {
                 let _ = app.player.toggle_pause().await;
@@ -2029,6 +2305,12 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                             app.open_track_menu(track);
                         }
                     }
+                } else if app.active_tab == ActiveTab::Favorites {
+                    if let Some(i) = app.favorites_list_state.selected() {
+                        if let Some(track) = app.favorites.get(i).cloned() {
+                            app.open_track_menu(track);
+                        }
+                    }
                 } else if app.active_tab == ActiveTab::Playlists && app.view_state == ViewState::PlaylistDetail {
                     if let Some(i) = app.track_list_state.selected() {
                         if let Some(track) = app.playlist_tracks.get(i).cloned() {
@@ -2037,7 +2319,7 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                     }
                 }
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Right => {
                 if app.active_tab == ActiveTab::Settings {
                     let selected = app.settings_list_state.selected().unwrap_or(0);
                     if selected == 0 {
@@ -2050,6 +2332,12 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 } else if app.active_tab == ActiveTab::Search {
                     if let Some(i) = app.search_list_state.selected() {
                         if let Some(track) = app.search_results.get(i).cloned() {
+                            app.open_track_menu(track);
+                        }
+                    }
+                } else if app.active_tab == ActiveTab::Favorites {
+                    if let Some(i) = app.favorites_list_state.selected() {
+                        if let Some(track) = app.favorites.get(i).cloned() {
                             app.open_track_menu(track);
                         }
                     }
@@ -2074,7 +2362,7 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                     let _ = app.player.seek(5.0).await;
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Left => {
                 if app.active_tab == ActiveTab::Settings {
                     let selected = app.settings_list_state.selected().unwrap_or(0);
                     if selected == 0 {
