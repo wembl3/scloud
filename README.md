@@ -1,11 +1,12 @@
-# 🎵 SoundRust (`sc-player`)
+# 🎵 SoundRust v1.0
 
 > A blazingly fast, lightweight SoundCloud terminal player written in Rust.  
 > Listen to SoundCloud without Chromium, Electron, or browser tabs eating your RAM.
 
-![Rust](https://img.shields.io/badge/rust-2024_edition-orange?logo=rust)
-![License](https://img.shields.io/badge/license-MIT-blue)
-![Platform](https://img.shields.io/badge/platform-Linux-lightgrey?logo=linux)
+![Version](https://img.shields.io/badge/version-v1.0.0-green?style=flat-square)
+![Rust](https://img.shields.io/badge/rust-2024_edition-orange?logo=rust&style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-Linux-lightgrey?logo=linux&style=flat-square)
 
 ---
 

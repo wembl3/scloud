@@ -502,7 +502,7 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
 }
 
 fn print_help() {
-    println!("SoundRust (sc-player) - Fast SoundCloud Terminal Player\n");
+    println!("SoundRust v1.0 - Fast SoundCloud Terminal Player\n");
     println!("USAGE:");
     println!("  sc-player               Launch the TUI music player");
     println!("  sc-player login [TOKEN] Authenticate with your SoundCloud account");
@@ -722,7 +722,7 @@ async fn main() -> Result<()> {
                 Span::raw("| "),
                 Span::styled(search_prompt, if app.input_mode == InputMode::Searching { Style::default().fg(Color::White).bg(Color::Blue) } else { Style::default().fg(Color::DarkGray) }),
             ]))
-            .block(Block::default().borders(Borders::ALL).title(" SoundRust ").border_type(BorderType::Rounded));
+            .block(Block::default().borders(Borders::ALL).title(" SoundRust v1.0 ").border_type(BorderType::Rounded));
 
             f.render_widget(header, chunks[0]);
 

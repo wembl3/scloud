@@ -1,6 +1,6 @@
 [package]
 name = "sc_player"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "Fast, lightweight terminal SoundCloud player with Spotify-like autoplay and MPRIS system media controls"
 license = "MIT"
