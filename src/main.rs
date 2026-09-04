@@ -1107,7 +1107,7 @@ async fn main() -> Result<()> {
         }
 
         let colors = app.theme.colors();
-        let now_playing_height = if app.cava_enabled { 5 } else { 4 };
+        let now_playing_height = 3;
 
         terminal.draw(|f| {
             let bg_color = if app.theme_background && app.theme != ThemeName::System {
@@ -1142,12 +1142,6 @@ async fn main() -> Result<()> {
                 Span::styled(" [👤 Guest] ", Style::default().fg(colors.text_dim))
             };
 
-            let auth_btn = if app.sc.oauth_token.is_some() {
-                Span::styled(" [Shift+L] Logout ", Style::default().fg(colors.error))
-            } else {
-                Span::styled(" [Shift+L] Login ", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
-            };
-
             let tab_playlists = if app.active_tab == ActiveTab::Playlists {
                 Span::styled(" [1] 📁 Playlists ", Style::default().fg(Color::Black).bg(colors.primary).add_modifier(Modifier::BOLD))
             } else {
@@ -1173,27 +1167,21 @@ async fn main() -> Result<()> {
             };
 
             let shuffle_badge = if app.shuffle {
-                Span::styled(" [🔀 SHUFFLE: ON] ", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD))
+                Span::styled(" [🔀 ON] ", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [SHUFFLE: OFF] ", Style::default().fg(colors.text_dim))
+                Span::styled(" [🔀 OFF] ", Style::default().fg(colors.text_dim))
             };
 
             let autoplay_badge = if app.autoplay {
-                Span::styled(" [📻 AUTOPLAY: ON] ", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
+                Span::styled(" [📻 AUTO: ON] ", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [AUTOPLAY: OFF] ", Style::default().fg(colors.text_dim))
-            };
-
-            let search_prompt = if app.input_mode == InputMode::Searching {
-                format!(" Search: {}█ ", app.search_query)
-            } else {
-                " [/] Search ".to_string()
+                Span::styled(" [📻 AUTO: OFF] ", Style::default().fg(colors.text_dim))
             };
 
             let header = Paragraph::new(Line::from(vec![
                 Span::styled(" SoundRust ", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
                 user_badge,
-                auth_btn,
+                Span::raw(" "),
                 tab_playlists,
                 Span::raw(" "),
                 tab_favorites,
@@ -1201,11 +1189,10 @@ async fn main() -> Result<()> {
                 tab_search,
                 Span::raw(" "),
                 tab_settings,
+                Span::raw("  "),
                 shuffle_badge,
                 autoplay_badge,
                 Span::styled(format!("Vol: {:.0}% ", state.volume), Style::default().fg(colors.warning)),
-                Span::raw("| "),
-                Span::styled(search_prompt, if app.input_mode == InputMode::Searching { Style::default().fg(Color::White).bg(colors.primary) } else { Style::default().fg(colors.text_dim) }),
             ]))
             .block(
                 Block::default()
@@ -1491,6 +1478,56 @@ async fn main() -> Result<()> {
                     }
                 }
                 ActiveTab::Search => {
+                    let search_chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(3), // Dedicated Search Input Box
+                            Constraint::Min(4),    // Search Results List
+                        ])
+                        .split(main_chunks[0]);
+
+                    let (search_title, border_color) = if app.input_mode == InputMode::Searching {
+                        (
+                            " 🔍 Search SoundCloud (Press [Enter] to search, [Esc] to browse results) ",
+                            colors.border_active,
+                        )
+                    } else {
+                        (
+                            " 🔍 Search Query (Press [/] to edit query, [Enter] to play selected) ",
+                            colors.border,
+                        )
+                    };
+
+                    let search_line = if app.input_mode == InputMode::Searching {
+                        Line::from(vec![
+                            Span::styled(" Query: ", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
+                            Span::styled(&app.search_query, Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
+                            Span::styled("█", Style::default().fg(colors.accent)),
+                        ])
+                    } else if app.search_query.is_empty() {
+                        Line::from(vec![
+                            Span::styled(" Query: ", Style::default().fg(colors.text_dim)),
+                            Span::styled("Press [/] to type query and search...", Style::default().fg(colors.text_dim)),
+                        ])
+                    } else {
+                        Line::from(vec![
+                            Span::styled(" Query: ", Style::default().fg(colors.secondary).add_modifier(Modifier::BOLD)),
+                            Span::styled(&app.search_query, Style::default().fg(colors.text)),
+                            Span::styled(" (Press [/] to edit)", Style::default().fg(colors.text_dim)),
+                        ])
+                    };
+
+                    let search_box = Paragraph::new(search_line)
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title(search_title)
+                                .border_type(BorderType::Rounded)
+                                .border_style(Style::default().fg(border_color))
+                                .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
+                        );
+                    f.render_widget(search_box, search_chunks[0]);
+
                     let items: Vec<ListItem> = app
                         .search_results
                         .iter()
@@ -1510,9 +1547,11 @@ async fn main() -> Result<()> {
                         .collect();
 
                     let title = if app.is_loading {
-                        " 🔍 Search Results [Loading...] "
+                        " 🎵 Search Results [Loading...] ".to_string()
+                    } else if app.search_results.is_empty() {
+                        " 🎵 Search Results (No tracks found or query empty) ".to_string()
                     } else {
-                        " 🔍 Search Results (Press [Enter] to play, [f] to favorite, [→/m] menu) "
+                        format!(" 🎵 Search Results ({}) (Press [Enter] to play, [f] to favorite, [→/m] menu) ", app.search_results.len())
                     };
 
                     let list = List::new(items)
@@ -1527,7 +1566,7 @@ async fn main() -> Result<()> {
                         .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
                         .highlight_symbol("▶ ");
 
-                    f.render_stateful_widget(list, main_chunks[0], &mut app.search_list_state);
+                    f.render_stateful_widget(list, search_chunks[1], &mut app.search_list_state);
                 }
             }
 
@@ -1598,7 +1637,7 @@ async fn main() -> Result<()> {
                             Line::from(vec![
                                 Span::raw("Status: "),
                                 if app.cava_enabled {
-                                    Span::styled("ENABLED", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
+                                    Span::styled("ENABLED (in Queue pane)", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
                                 } else {
                                     Span::styled("DISABLED", Style::default().fg(colors.error).add_modifier(Modifier::BOLD))
                                 },
@@ -1610,16 +1649,18 @@ async fn main() -> Result<()> {
                                 Span::styled("⚠️ CAVA not found in PATH or ~/.local/bin/cava", Style::default().fg(colors.warning))
                             }),
                             Line::from(""),
-                            Line::from(Span::styled("Real-time audio frequency equalizer in Now Playing bar:", Style::default().fg(colors.text))),
+                            Line::from(Span::styled("Real-time audio frequency equalizer in Queue pane:", Style::default().fg(colors.text))),
                             Line::from(vec![
-                                Span::styled("  ▲ Upper row: Peaks / Treble ", Style::default().fg(colors.visualizer_high)),
+                                Span::styled("  ▲ Upper rows: Peaks / Treble ", Style::default().fg(colors.visualizer_high)),
                             ]),
                             Line::from(vec![
-                                Span::styled("  ■ Middle row: Vocals / Midtones ", Style::default().fg(colors.visualizer_mid)),
+                                Span::styled("  ■ Middle rows: Vocals / Midtones ", Style::default().fg(colors.visualizer_mid)),
                             ]),
                             Line::from(vec![
-                                Span::styled("  ▼ Lower row: Bass / Sub-bass ", Style::default().fg(colors.visualizer_low)),
+                                Span::styled("  ▼ Lower rows: Bass / Sub-bass ", Style::default().fg(colors.visualizer_low)),
                             ]),
+                            Line::from(""),
+                            Line::from(Span::styled("When enabled, the right column splits into Queue (top 55%) and Audio Spectrum (bottom 45%).", Style::default().fg(colors.text_dim))),
                             Line::from(""),
                             Line::from(Span::styled("💡 Press [Enter] or [v] to toggle visualizer.", Style::default().fg(colors.warning))),
                         ],
@@ -1756,7 +1797,112 @@ async fn main() -> Result<()> {
                             .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
                     );
 
-                f.render_widget(queue_list, main_chunks[1]);
+                if app.cava_enabled {
+                    let right_chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Percentage(55), // Upcoming Queue
+                            Constraint::Percentage(45), // Audio Visualizer
+                        ])
+                        .split(main_chunks[1]);
+
+                    f.render_widget(queue_list, right_chunks[0]);
+
+                    let is_playing = !state.paused && app.current_track.is_some();
+                    let vis_title = if is_playing {
+                        " 📊 Audio Visualizer "
+                    } else {
+                        " 📊 Audio Visualizer [Paused] "
+                    };
+                    let vis_block = Block::default()
+                        .borders(Borders::ALL)
+                        .title(vis_title)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(if is_playing { colors.border_active } else { colors.border }))
+                        .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() });
+
+                    let inner_vis = vis_block.inner(right_chunks[1]);
+                    f.render_widget(vis_block, right_chunks[1]);
+
+                    if inner_vis.width >= 6 && inner_vis.height >= 2 {
+                        let w = inner_vis.width as usize;
+                        let h = inner_vis.height as usize;
+
+                        let (bar_width, gap) = if w >= 36 { (2, 1) } else { (1, 1) };
+                        let num_bars = ((w + gap) / (bar_width + gap)).clamp(4, 32);
+                        let total_bars_w = num_bars * bar_width + (num_bars - 1) * gap;
+                        let left_pad = w.saturating_sub(total_bars_w) / 2;
+
+                        let bars = app.cava.get_bars(num_bars, is_playing, state.position);
+
+                        let show_labels = h >= 5;
+                        let spec_h = if show_labels { h - 1 } else { h };
+                        let total_levels = spec_h * 8;
+
+                        const BLOCKS: [char; 8] = [' ', ' ', '▂', '▃', '▄', '▅', '▆', '▇'];
+                        let mut lines = Vec::with_capacity(h);
+
+                        for r in 0..spec_h {
+                            let row_from_bottom = spec_h - 1 - r;
+                            let row_ratio = row_from_bottom as f64 / (spec_h as f64 - 1.0).max(1.0);
+                            let row_color = if row_ratio >= 0.70 {
+                                colors.visualizer_high
+                            } else if row_ratio >= 0.35 {
+                                colors.visualizer_mid
+                            } else {
+                                colors.visualizer_low
+                            };
+
+                            let mut spans = Vec::new();
+                            if left_pad > 0 {
+                                spans.push(Span::raw(" ".repeat(left_pad)));
+                            }
+
+                            for (i, &raw_val) in bars.iter().enumerate() {
+                                let norm = (raw_val as f64 / cava::MAX_CAVA_RANGE as f64).clamp(0.0, 1.0);
+                                let bar_level = (norm * total_levels as f64).round() as usize;
+
+                                let lower_threshold = row_from_bottom * 8;
+                                let upper_threshold = (row_from_bottom + 1) * 8;
+
+                                if bar_level >= upper_threshold {
+                                    spans.push(Span::styled("█".repeat(bar_width), Style::default().fg(row_color)));
+                                } else if bar_level <= lower_threshold {
+                                    spans.push(Span::raw(" ".repeat(bar_width)));
+                                } else {
+                                    let rem = bar_level.saturating_sub(lower_threshold);
+                                    let ch = BLOCKS[rem.min(7)];
+                                    spans.push(Span::styled(ch.to_string().repeat(bar_width), Style::default().fg(row_color)));
+                                }
+
+                                if i + 1 < num_bars {
+                                    spans.push(Span::raw(" ".repeat(gap)));
+                                }
+                            }
+
+                            lines.push(Line::from(spans));
+                        }
+
+                        if show_labels {
+                            let pad_w = total_bars_w.saturating_sub(16) / 2;
+                            let label_line = Line::from(vec![
+                                Span::raw(" ".repeat(left_pad)),
+                                Span::styled("Bass", Style::default().fg(colors.visualizer_low)),
+                                Span::raw(" ".repeat(pad_w.max(2))),
+                                Span::styled("Mids", Style::default().fg(colors.visualizer_mid)),
+                                Span::raw(" ".repeat(pad_w.max(2))),
+                                Span::styled("Treble", Style::default().fg(colors.visualizer_high)),
+                            ]);
+                            lines.push(label_line);
+                        }
+
+                        let p = Paragraph::new(lines)
+                            .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() });
+                        f.render_widget(p, inner_vis);
+                    }
+                } else {
+                    f.render_widget(queue_list, main_chunks[1]);
+                }
             }
 
             // 3. Now Playing Bar
@@ -1784,45 +1930,12 @@ async fn main() -> Result<()> {
                 outer_block = outer_block.style(Style::default().bg(bg_widget_color));
             }
 
-            if app.cava_enabled {
-                let inner = outer_block.inner(chunks[2]);
-                f.render_widget(outer_block, chunks[2]);
-
-                let inner_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(1), // Progress Gauge
-                        Constraint::Length(1), // Sleek Braille Wave
-                    ])
-                    .split(inner);
-
-                let gauge = Gauge::default()
-                    .gauge_style(Style::default().fg(colors.gauge_fg).bg(colors.gauge_bg))
-                    .percent(percent)
-                    .label(Span::styled(time_str, Style::default().fg(colors.text).add_modifier(Modifier::BOLD)));
-                f.render_widget(gauge, inner_chunks[0]);
-
-                let vis_width = inner_chunks[1].width as usize;
-                let is_playing = !state.paused && app.current_track.is_some();
-                let wave_str = app.cava.get_braille_wave(vis_width.saturating_sub(6), is_playing, state.position);
-
-                let mut vis_widget = Paragraph::new(Line::from(vec![
-                    Span::styled(" ∿ ", Style::default().fg(colors.primary)),
-                    Span::styled(wave_str, Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
-                    Span::styled(" ∿ ", Style::default().fg(colors.primary)),
-                ]));
-                if bg_widget_color != Color::Reset {
-                    vis_widget = vis_widget.style(Style::default().bg(bg_widget_color));
-                }
-                f.render_widget(vis_widget, inner_chunks[1]);
-            } else {
-                let gauge = Gauge::default()
-                    .block(outer_block)
-                    .gauge_style(Style::default().fg(colors.gauge_fg).bg(colors.gauge_bg))
-                    .percent(percent)
-                    .label(Span::styled(time_str, Style::default().fg(colors.text).add_modifier(Modifier::BOLD)));
-                f.render_widget(gauge, chunks[2]);
-            }
+            let gauge = Gauge::default()
+                .block(outer_block)
+                .gauge_style(Style::default().fg(colors.gauge_fg).bg(colors.gauge_bg))
+                .percent(percent)
+                .label(Span::styled(time_str, Style::default().fg(colors.text).add_modifier(Modifier::BOLD)));
+            f.render_widget(gauge, chunks[2]);
 
             // 4. Footer controls help
             let footer = Paragraph::new(Line::from(vec![
@@ -1839,7 +1952,7 @@ async fn main() -> Result<()> {
                 Span::styled("[b]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
                 Span::raw(" BG "),
                 Span::styled("[v]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
-                Span::raw(" Wave "),
+                Span::raw(" Visualizer "),
                 Span::styled("[s]", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
                 Span::raw(" Shuffle "),
                 Span::styled("[a]", Style::default().fg(colors.success).add_modifier(Modifier::BOLD)),
@@ -2078,8 +2191,16 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             KeyCode::Backspace => {
                 app.search_query.pop();
             }
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::Down => {
                 app.input_mode = InputMode::Normal;
+            }
+            KeyCode::Tab => {
+                app.input_mode = InputMode::Normal;
+                app.active_tab = ActiveTab::Settings;
+            }
+            KeyCode::BackTab => {
+                app.input_mode = InputMode::Normal;
+                app.active_tab = ActiveTab::Favorites;
             }
             _ => {}
         },
@@ -2111,13 +2232,20 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             }
             KeyCode::Char('3') => {
                 app.active_tab = ActiveTab::Search;
+                if app.search_results.is_empty() {
+                    app.input_mode = InputMode::Searching;
+                }
             }
             KeyCode::Char('4') | KeyCode::Char('o') => {
                 app.active_tab = ActiveTab::Settings;
             }
             KeyCode::Char('/') => {
+                app.active_tab = ActiveTab::Search;
                 app.input_mode = InputMode::Searching;
                 app.search_query.clear();
+            }
+            KeyCode::Char('i') if app.active_tab == ActiveTab::Search => {
+                app.input_mode = InputMode::Searching;
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 app.select_next();

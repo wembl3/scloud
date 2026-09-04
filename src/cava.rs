@@ -11,7 +11,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::RwLock as TokioRwLock;
 
 pub const DEFAULT_CAVA_BARS: usize = 48;
-pub const MAX_CAVA_RANGE: u8 = 24;
+pub const MAX_CAVA_RANGE: u8 = 100;
 
 pub struct CavaManager {
     bars: Arc<StdRwLock<Vec<u8>>>,
@@ -197,6 +197,7 @@ impl CavaManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_braille_wave(&self, char_width: usize, is_playing: bool, position_sec: f64) -> String {
         if char_width == 0 {
             return String::new();
@@ -214,6 +215,7 @@ impl CavaManager {
     }
 }
 
+#[allow(dead_code)]
 pub fn braille_char(h1: u8, h2: u8) -> char {
     const COL1: [u32; 5] = [0, 0x40, 0x44, 0x46, 0x47];
     const COL2: [u32; 5] = [0, 0x80, 0xA0, 0xB0, 0xB8];
@@ -238,7 +240,7 @@ mod tests {
         assert!(config.exists());
         let content = std::fs::read_to_string(config).unwrap();
         assert!(content.contains("bars = 48"));
-        assert!(content.contains("ascii_max_range = 24"));
+        assert!(content.contains("ascii_max_range = 100"));
     }
 
     #[test]
