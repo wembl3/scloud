@@ -76,7 +76,7 @@ impl RootInterface for MprisHandler {
     }
 
     async fn identity(&self) -> fdo::Result<String> {
-        Ok("SoundCloud Player (SoundRust)".to_string())
+        Ok("SoundRust".to_string())
     }
 
     async fn desktop_entry(&self) -> fdo::Result<String> {

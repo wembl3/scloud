@@ -622,8 +622,30 @@ async fn main() -> Result<()> {
 
     let mut app = App::new(event_tx, mpris.clone()).await?;
 
-    let tick_rate = Duration::from_millis(100);
-    let mut last_tick = std::time::Instant::now();
+    let (key_tx, mut key_rx) = mpsc::channel::<crossterm::event::KeyEvent>(64);
+    let app_running = app.player.is_running.clone();
+
+    // Spawn dedicated thread for non-blocking crossterm event reading
+    std::thread::spawn(move || {
+        while app_running.load(std::sync::atomic::Ordering::SeqCst) {
+            match event::poll(Duration::from_millis(250)) {
+                Ok(true) => {
+                    if let Ok(Event::Key(key)) = event::read() {
+                        if key.kind == KeyEventKind::Press {
+                            if key_tx.blocking_send(key).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Ok(false) => {}
+                Err(_) => break, // Terminal closed or error -> break cleanly
+            }
+        }
+    });
+
+    let mut render_interval = tokio::time::interval(Duration::from_millis(250));
+    render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         let state = app.player.state.read().await.clone();
@@ -700,7 +722,7 @@ async fn main() -> Result<()> {
                 Span::raw("| "),
                 Span::styled(search_prompt, if app.input_mode == InputMode::Searching { Style::default().fg(Color::White).bg(Color::Blue) } else { Style::default().fg(Color::DarkGray) }),
             ]))
-            .block(Block::default().borders(Borders::ALL).title(" SoundCloud CLI Player ").border_type(BorderType::Rounded));
+            .block(Block::default().borders(Borders::ALL).title(" SoundRust ").border_type(BorderType::Rounded));
 
             f.render_widget(header, chunks[0]);
 
@@ -898,186 +920,58 @@ async fn main() -> Result<()> {
             f.render_widget(footer, chunks[3]);
         })?;
 
-        // Handle internal track ended events (trigger next track or Spotify autoplay)
-        while let Ok(_) = event_rx.try_recv() {
-            app.next_track().await;
-        }
-
-        // Handle Linux MPRIS D-Bus actions (from media keys, lockscreen, playerctl, KDE/GNOME widgets)
-        while let Ok(action) = mpris_rx.try_recv() {
-            match action {
-                MprisAction::PlayPause => {
-                    let _ = app.player.toggle_pause().await;
-                }
-                MprisAction::Next => {
-                    app.next_track().await;
-                }
-                MprisAction::Previous => {
-                    let _ = app.player.seek(-5.0).await;
-                }
-                MprisAction::Stop => {
-                    let _ = app.player.stop().await;
-                    app.current_track = None;
-                    app.active_playlist = None;
-                    if let Some(ref m) = app.mpris {
-                        m.set_stopped().await;
-                    }
-                    app.status_message = "Playback stopped.".to_string();
-                }
-                MprisAction::Seek(delta) => {
-                    let _ = app.player.seek(delta).await;
-                }
-                MprisAction::SetVolume(vol) => {
-                    let _ = app.player.set_volume(vol).await;
-                }
-                MprisAction::ToggleShuffle => {
-                    app.toggle_shuffle();
-                }
+        tokio::select! {
+            _ = render_interval.tick() => {}
+            Some(_) = event_rx.recv() => {
+                app.next_track().await;
             }
-        }
-
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
-
-        if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match app.input_mode {
-                        InputMode::Searching => match key.code {
-                            KeyCode::Enter => {
-                                app.execute_search().await;
-                            }
-                            KeyCode::Char(c) => {
-                                app.search_query.push(c);
-                            }
-                            KeyCode::Backspace => {
-                                app.search_query.pop();
-                            }
-                            KeyCode::Esc => {
-                                app.input_mode = InputMode::Normal;
-                            }
-                            _ => {}
-                        },
-                        InputMode::Normal => match key.code {
-                            KeyCode::Char('q') => {
-                                break;
-                            }
-                            KeyCode::Tab => {
-                                app.active_tab = match app.active_tab {
-                                    ActiveTab::Playlists => ActiveTab::Search,
-                                    ActiveTab::Search => ActiveTab::Playlists,
-                                };
-                            }
-                            KeyCode::Char('1') => {
-                                app.active_tab = ActiveTab::Playlists;
-                            }
-                            KeyCode::Char('2') => {
-                                app.active_tab = ActiveTab::Search;
-                            }
-                            KeyCode::Char('/') => {
-                                app.input_mode = InputMode::Searching;
-                                app.search_query.clear();
-                            }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                app.select_next();
-                            }
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                app.select_prev();
-                            }
-                            KeyCode::Esc | KeyCode::Backspace => {
-                                if app.active_tab == ActiveTab::Playlists && app.view_state == ViewState::PlaylistDetail {
-                                    app.view_state = ViewState::PlaylistList;
-                                    app.status_message = "Back to playlists list".to_string();
-                                }
-                            }
-                            KeyCode::Enter => {
-                                match app.active_tab {
-                                    ActiveTab::Search => {
-                                        if let Some(i) = app.search_list_state.selected() {
-                                            if let Some(track) = app.search_results.get(i).cloned() {
-                                                app.queue.clear();
-                                                app.play_track(track).await;
-                                            }
-                                        }
-                                    }
-                                    ActiveTab::Playlists => {
-                                        match app.view_state {
-                                            ViewState::PlaylistList => {
-                                                if let Some(i) = app.playlist_list_state.selected() {
-                                                    if let Some(pl) = app.user_playlists.get(i).cloned() {
-                                                        app.open_playlist(pl).await;
-                                                    }
-                                                }
-                                            }
-                                            ViewState::PlaylistDetail => {
-                                                if let Some(i) = app.track_list_state.selected() {
-                                                    app.play_playlist_track(i).await;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            KeyCode::Char('p') => {
-                                if app.active_tab == ActiveTab::Playlists {
-                                    match app.view_state {
-                                        ViewState::PlaylistList => {
-                                            if let Some(i) = app.playlist_list_state.selected() {
-                                                if let Some(pl) = app.user_playlists.get(i).cloned() {
-                                                    app.open_playlist(pl).await;
-                                                    app.play_entire_playlist().await;
-                                                }
-                                            }
-                                        }
-                                        ViewState::PlaylistDetail => {
-                                            app.play_entire_playlist().await;
-                                        }
-                                    }
-                                }
-                            }
-                            KeyCode::Char('s') => {
-                                app.toggle_shuffle();
-                            }
-                            KeyCode::Char(' ') => {
-                                let _ = app.player.toggle_pause().await;
-                            }
-                            KeyCode::Char('n') => {
-                                app.next_track().await;
-                            }
-                            KeyCode::Char('a') => {
-                                app.autoplay = !app.autoplay;
-                                app.status_message = format!(
-                                    "📻 Autoplay is now {}",
-                                    if app.autoplay { "ON (infinite similar music!)" } else { "OFF" }
-                                );
-                            }
-                            KeyCode::Right | KeyCode::Char('l') => {
-                                let _ = app.player.seek(5.0).await;
-                            }
-                            KeyCode::Left | KeyCode::Char('h') => {
-                                let _ = app.player.seek(-5.0).await;
-                            }
-                            KeyCode::Char('+') | KeyCode::Char('=') => {
-                                let vol = state.volume + 5.0;
-                                let _ = app.player.set_volume(vol).await;
-                            }
-                            KeyCode::Char('-') => {
-                                let vol = state.volume - 5.0;
-                                let _ = app.player.set_volume(vol).await;
-                            }
-                            KeyCode::Char('L') => {
-                                app.toggle_account().await;
-                            }
-                            _ => {}
-                        },
+            Some(action) = mpris_rx.recv() => {
+                match action {
+                    MprisAction::PlayPause => {
+                        let _ = app.player.toggle_pause().await;
+                    }
+                    MprisAction::Next => {
+                        app.next_track().await;
+                    }
+                    MprisAction::Previous => {
+                        let _ = app.player.seek(-5.0).await;
+                    }
+                    MprisAction::Stop => {
+                        let _ = app.player.stop().await;
+                        app.current_track = None;
+                        app.active_playlist = None;
+                        if let Some(ref m) = app.mpris {
+                            m.set_stopped().await;
+                        }
+                        app.status_message = "Playback stopped.".to_string();
+                    }
+                    MprisAction::Seek(delta) => {
+                        let _ = app.player.seek(delta).await;
+                    }
+                    MprisAction::SetVolume(vol) => {
+                        let _ = app.player.set_volume(vol).await;
+                    }
+                    MprisAction::ToggleShuffle => {
+                        app.toggle_shuffle();
                     }
                 }
             }
-        }
-
-        if last_tick.elapsed() >= tick_rate {
-            last_tick = std::time::Instant::now();
+            key_opt = key_rx.recv() => {
+                match key_opt {
+                    Some(key) => {
+                        if handle_key(&mut app, key).await {
+                            break;
+                        }
+                    }
+                    None => {
+                        // Terminal closed / stdin reached EOF
+                        break;
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                break;
+            }
         }
     }
 
@@ -1086,4 +980,139 @@ async fn main() -> Result<()> {
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
+    let state_volume = app.player.state.read().await.volume;
+
+    match app.input_mode {
+        InputMode::Searching => match key.code {
+            KeyCode::Enter => {
+                app.execute_search().await;
+            }
+            KeyCode::Char(c) => {
+                app.search_query.push(c);
+            }
+            KeyCode::Backspace => {
+                app.search_query.pop();
+            }
+            KeyCode::Esc => {
+                app.input_mode = InputMode::Normal;
+            }
+            _ => {}
+        },
+        InputMode::Normal => match key.code {
+            KeyCode::Char('q') => {
+                return true;
+            }
+            KeyCode::Tab => {
+                app.active_tab = match app.active_tab {
+                    ActiveTab::Playlists => ActiveTab::Search,
+                    ActiveTab::Search => ActiveTab::Playlists,
+                };
+            }
+            KeyCode::Char('1') => {
+                app.active_tab = ActiveTab::Playlists;
+            }
+            KeyCode::Char('2') => {
+                app.active_tab = ActiveTab::Search;
+            }
+            KeyCode::Char('/') => {
+                app.input_mode = InputMode::Searching;
+                app.search_query.clear();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.select_next();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.select_prev();
+            }
+            KeyCode::Esc | KeyCode::Backspace => {
+                if app.active_tab == ActiveTab::Playlists && app.view_state == ViewState::PlaylistDetail {
+                    app.view_state = ViewState::PlaylistList;
+                    app.status_message = "Back to playlists list".to_string();
+                }
+            }
+            KeyCode::Enter => {
+                match app.active_tab {
+                    ActiveTab::Search => {
+                        if let Some(i) = app.search_list_state.selected() {
+                            if let Some(track) = app.search_results.get(i).cloned() {
+                                app.queue.clear();
+                                app.play_track(track).await;
+                            }
+                        }
+                    }
+                    ActiveTab::Playlists => {
+                        match app.view_state {
+                            ViewState::PlaylistList => {
+                                if let Some(i) = app.playlist_list_state.selected() {
+                                    if let Some(pl) = app.user_playlists.get(i).cloned() {
+                                        app.open_playlist(pl).await;
+                                    }
+                                }
+                            }
+                            ViewState::PlaylistDetail => {
+                                if let Some(i) = app.track_list_state.selected() {
+                                    app.play_playlist_track(i).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('p') => {
+                if app.active_tab == ActiveTab::Playlists {
+                    match app.view_state {
+                        ViewState::PlaylistList => {
+                            if let Some(i) = app.playlist_list_state.selected() {
+                                if let Some(pl) = app.user_playlists.get(i).cloned() {
+                                    app.open_playlist(pl).await;
+                                    app.play_entire_playlist().await;
+                                }
+                            }
+                        }
+                        ViewState::PlaylistDetail => {
+                            app.play_entire_playlist().await;
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('s') => {
+                app.toggle_shuffle();
+            }
+            KeyCode::Char(' ') => {
+                let _ = app.player.toggle_pause().await;
+            }
+            KeyCode::Char('n') => {
+                app.next_track().await;
+            }
+            KeyCode::Char('a') => {
+                app.autoplay = !app.autoplay;
+                app.status_message = format!(
+                    "📻 Autoplay is now {}",
+                    if app.autoplay { "ON (infinite similar music!)" } else { "OFF" }
+                );
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                let _ = app.player.seek(5.0).await;
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                let _ = app.player.seek(-5.0).await;
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                let vol = state_volume + 5.0;
+                let _ = app.player.set_volume(vol).await;
+            }
+            KeyCode::Char('-') => {
+                let vol = state_volume - 5.0;
+                let _ = app.player.set_volume(vol).await;
+            }
+            KeyCode::Char('L') => {
+                app.toggle_account().await;
+            }
+            _ => {}
+        },
+    }
+    false
 }

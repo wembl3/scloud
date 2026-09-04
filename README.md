@@ -43,8 +43,8 @@ sudo dnf install mpv
 Clone the repository and build with Cargo:
 
 ```bash
-git clone https://github.com/your-username/sc-player.git
-cd sc-player
+git clone https://github.com/wembl3/scloud.git
+cd scloud
 cargo build --release
 
 # Symlink or copy to your local bin path

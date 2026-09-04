@@ -3,4 +3,11 @@
 *.sqlite*
 .env*
 config.json
+*.json
+!Cargo.toml
+*cookies*
+*token*
 scratch/
+.system_generated/
+*.log
+*.tmp
