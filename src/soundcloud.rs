@@ -123,6 +123,8 @@ pub struct Config {
     pub theme: ThemeName,
     #[serde(default = "default_volume")]
     pub volume: f64,
+    #[serde(default = "default_true")]
+    pub theme_background: bool,
 }
 
 impl Default for Config {
@@ -132,8 +134,9 @@ impl Default for Config {
             download_covers: true,
             autoplay: true,
             cava_enabled: true,
-            theme: ThemeName::CatppuccinMocha,
+            theme: ThemeName::Btop,
             volume: 85.0,
+            theme_background: true,
         }
     }
 }
@@ -623,7 +626,8 @@ mod tests {
         assert!(config.download_covers);
         assert!(config.autoplay);
         assert!(config.cava_enabled);
-        assert_eq!(config.theme, ThemeName::CatppuccinMocha);
+        assert_eq!(config.theme, ThemeName::Btop);
         assert_eq!(config.volume, 85.0);
+        assert!(config.theme_background);
     }
 }

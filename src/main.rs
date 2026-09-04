@@ -36,7 +36,7 @@ enum ActiveTab {
     Settings,
 }
 
-const SETTINGS_COUNT: usize = 7;
+const SETTINGS_COUNT: usize = 8;
 const SUB_BLOCKS: [char; 9] = [' ', ' ', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 #[derive(PartialEq)]
@@ -64,6 +64,7 @@ struct App {
     cava: Arc<CavaManager>,
     cava_enabled: bool,
     theme: ThemeName,
+    theme_background: bool,
     active_tab: ActiveTab,
     view_state: ViewState,
     search_query: String,
@@ -85,6 +86,7 @@ struct App {
     input_mode: InputMode,
     status_message: String,
     is_loading: bool,
+    needs_clear: bool,
 }
 
 impl App {
@@ -117,6 +119,7 @@ impl App {
             cava,
             cava_enabled: config.cava_enabled,
             theme: config.theme,
+            theme_background: config.theme_background,
             active_tab: ActiveTab::Playlists,
             view_state: ViewState::PlaylistList,
             search_query: String::new(),
@@ -138,6 +141,7 @@ impl App {
             input_mode: InputMode::Normal,
             status_message: String::new(),
             is_loading: false,
+            needs_clear: false,
         };
 
         if let Some(ref prof) = app.sc.user_profile {
@@ -469,6 +473,7 @@ impl App {
 
     fn cycle_theme(&mut self) {
         self.theme = self.theme.next();
+        self.needs_clear = true;
         let mut config = soundcloud::SoundCloud::load_config();
         config.theme = self.theme;
         let _ = soundcloud::SoundCloud::save_config(&config);
@@ -477,10 +482,23 @@ impl App {
 
     fn prev_theme(&mut self) {
         self.theme = self.theme.prev();
+        self.needs_clear = true;
         let mut config = soundcloud::SoundCloud::load_config();
         config.theme = self.theme;
         let _ = soundcloud::SoundCloud::save_config(&config);
         self.status_message = format!("🎨 Theme switched to: {}", self.theme.colors().name);
+    }
+
+    fn toggle_theme_background(&mut self) {
+        self.theme_background = !self.theme_background;
+        self.needs_clear = true;
+        let mut config = soundcloud::SoundCloud::load_config();
+        config.theme_background = self.theme_background;
+        let _ = soundcloud::SoundCloud::save_config(&config);
+        self.status_message = format!(
+            "🌌 Theme Background: {}",
+            if self.theme_background { "THEME BG (btop style)" } else { "SYSTEM TRANSPARENT" }
+        );
     }
 
     async fn toggle_cava(&mut self) {
@@ -512,10 +530,14 @@ impl App {
                 self.cycle_theme();
             }
             1 => {
+                // Theme Background
+                self.toggle_theme_background();
+            }
+            2 => {
                 // CAVA Visualizer
                 self.toggle_cava().await;
             }
-            2 => {
+            3 => {
                 // Download Covers
                 self.download_covers = !self.download_covers;
                 let mut config = soundcloud::SoundCloud::load_config();
@@ -548,7 +570,7 @@ impl App {
                     }
                 }
             }
-            3 => {
+            4 => {
                 // Autoplay
                 self.autoplay = !self.autoplay;
                 let mut config = soundcloud::SoundCloud::load_config();
@@ -559,15 +581,15 @@ impl App {
                     if self.autoplay { "ON (infinite similar music!)" } else { "OFF" }
                 );
             }
-            4 => {
+            5 => {
                 // Shuffle
                 self.toggle_shuffle();
             }
-            5 => {
+            6 => {
                 // Account
                 self.toggle_account().await;
             }
-            6 => {
+            7 => {
                 // Clear Cover Cache
                 let cache_dir = soundcloud::covers_cache_dir();
                 let mut count = 0;
@@ -703,6 +725,7 @@ fn print_help() {
     println!("  s             Toggle Shuffle (randomizes playlist & queue)");
     println!("  a             Toggle Spotify-style Autoplay (infinite related tracks)");
     println!("  t / T         Cycle color themes (btop-inspired palettes)");
+    println!("  b             Toggle Theme Background (btop filled vs terminal transparent)");
     println!("  v             Toggle CAVA audio visualizer");
     println!("  Space         Pause / Play");
     println!("  n             Next track");
@@ -835,6 +858,11 @@ async fn main() -> Result<()> {
     });
 
     loop {
+        if app.needs_clear {
+            let _ = terminal.clear();
+            app.needs_clear = false;
+        }
+
         let state = app.player.state.read().await.clone();
 
         // Sync state to system MPRIS
@@ -846,6 +874,21 @@ async fn main() -> Result<()> {
         let now_playing_height = if app.cava_enabled { 6 } else { 4 };
 
         terminal.draw(|f| {
+            let bg_color = if app.theme_background && app.theme != ThemeName::System {
+                colors.bg
+            } else {
+                Color::Reset
+            };
+            let bg_widget_color = if app.theme_background && app.theme != ThemeName::System {
+                colors.bg_widget
+            } else {
+                Color::Reset
+            };
+
+            if bg_color != Color::Reset {
+                f.render_widget(Block::default().style(Style::default().bg(bg_color)), f.area());
+            }
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -920,7 +963,14 @@ async fn main() -> Result<()> {
                 Span::raw("| "),
                 Span::styled(search_prompt, if app.input_mode == InputMode::Searching { Style::default().fg(Color::White).bg(colors.primary) } else { Style::default().fg(colors.text_dim) }),
             ]))
-            .block(Block::default().borders(Borders::ALL).title(format!(" SoundRust v1.1 [{}] ", colors.title)).border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" SoundRust v1.1 [{}] ", colors.title))
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(colors.border))
+                    .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
+            );
 
             f.render_widget(header, chunks[0]);
 
@@ -946,6 +996,16 @@ async fn main() -> Result<()> {
                         ListItem::new(Line::from(vec![
                             Span::styled(" 🎨  UI Theme (btop palettes)            ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
                             Span::styled(format!("[ {} ]", colors.name), Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
+                        ])),
+                        ListItem::new(Line::from(vec![
+                            Span::styled(" 🌌  Theme Background Style             ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
+                            if app.theme == ThemeName::System {
+                                Span::styled("[ SYSTEM TRANSPARENT ]", Style::default().fg(colors.text_dim))
+                            } else if app.theme_background {
+                                Span::styled("[ THEME BG (btop style) ]", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
+                            } else {
+                                Span::styled("[ SYSTEM TRANSPARENT ]", Style::default().fg(colors.warning).add_modifier(Modifier::BOLD))
+                            },
                         ])),
                         ListItem::new(Line::from(vec![
                             Span::styled(" 📊  CAVA Audio Visualizer               ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
@@ -995,7 +1055,8 @@ async fn main() -> Result<()> {
                                 .borders(Borders::ALL)
                                 .title(" ⚙️ Settings (Press [Enter] to toggle / cycle) ")
                                 .border_type(BorderType::Rounded)
-                                .border_style(Style::default().fg(colors.border)),
+                                .border_style(Style::default().fg(colors.border))
+                                .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() }),
                         )
                         .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
                         .highlight_symbol("▶ ");
@@ -1024,7 +1085,14 @@ async fn main() -> Result<()> {
                             Line::from(Span::styled("   💡 You can already search and stream ANY track right now via [2] 🔍 Search (or press [/])!", Style::default().fg(colors.success))),
                         ];
                         let widget = Paragraph::new(text)
-                            .block(Block::default().borders(Borders::ALL).title(" 📁 Your Playlists ").border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)));
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .title(" 📁 Your Playlists ")
+                                    .border_type(BorderType::Rounded)
+                                    .border_style(Style::default().fg(colors.border))
+                                    .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
+                            );
                         f.render_widget(widget, main_chunks[0]);
                     } else {
                         match app.view_state {
@@ -1050,7 +1118,14 @@ async fn main() -> Result<()> {
                                 };
 
                                 let list = List::new(items)
-                                    .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)))
+                                    .block(
+                                        Block::default()
+                                            .borders(Borders::ALL)
+                                            .title(title)
+                                            .border_type(BorderType::Rounded)
+                                            .border_style(Style::default().fg(colors.border))
+                                            .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
+                                    )
                                     .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
                                     .highlight_symbol("▶ ");
 
@@ -1075,7 +1150,14 @@ async fn main() -> Result<()> {
 
                                 let title = format!(" 📁 Playlist: '{}' (Press [p] to play whole playlist, [Esc] back) ", app.selected_playlist_title);
                                 let list = List::new(items)
-                                    .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)))
+                                    .block(
+                                        Block::default()
+                                            .borders(Borders::ALL)
+                                            .title(title)
+                                            .border_type(BorderType::Rounded)
+                                            .border_style(Style::default().fg(colors.border))
+                                            .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
+                                    )
                                     .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
                                     .highlight_symbol("▶ ");
 
@@ -1108,7 +1190,14 @@ async fn main() -> Result<()> {
                     };
 
                     let list = List::new(items)
-                        .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title(title)
+                                .border_type(BorderType::Rounded)
+                                .border_style(Style::default().fg(colors.border))
+                                .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
+                        )
                         .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
                         .highlight_symbol("▶ ");
 
@@ -1126,15 +1215,16 @@ async fn main() -> Result<()> {
                         vec![
                             Line::from(Span::styled(format!("UI Theme: {}", colors.name), Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))),
                             Line::from(""),
-                            Line::from(Span::styled("8 btop-inspired color palettes:", Style::default().fg(colors.text))),
+                            Line::from(Span::styled("9 btop-inspired color palettes:", Style::default().fg(colors.text))),
+                            Line::from(Span::styled(" • btop Default (Classic navy palette from btop)", Style::default().fg(colors.text_dim))),
                             Line::from(Span::styled(" • Catppuccin Mocha (Soft modern pastel)", Style::default().fg(colors.text_dim))),
                             Line::from(Span::styled(" • Dracula (Classic purple dark)", Style::default().fg(colors.text_dim))),
                             Line::from(Span::styled(" • Tokyo Night (Deep neon blue)", Style::default().fg(colors.text_dim))),
                             Line::from(Span::styled(" • Nord (Arctic frost & teal)", Style::default().fg(colors.text_dim))),
-                            Line::from(Span::styled(" • Gruvbox (Retro warm groove)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Gruvbox Dark (Retro warm groove)", Style::default().fg(colors.text_dim))),
                             Line::from(Span::styled(" • Cyberpunk (High-contrast neon)", Style::default().fg(colors.text_dim))),
                             Line::from(Span::styled(" • Monokai Pro (Iconic vibrant)", Style::default().fg(colors.text_dim))),
-                            Line::from(Span::styled(" • Classic Default (Standard terminal)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • System / Terminal (Native terminal ANSI & transparency)", Style::default().fg(colors.text_dim))),
                             Line::from(""),
                             Line::from(Span::styled("Active Palette Preview:", Style::default().fg(colors.text))),
                             Line::from(vec![
@@ -1150,6 +1240,31 @@ async fn main() -> Result<()> {
                         ],
                     ),
                     1 => (
+                        " 🌌 Theme Background Settings ",
+                        vec![
+                            Line::from(Span::styled("Theme Background Fill (btop style)", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))),
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::raw("Current Style: "),
+                                if app.theme == ThemeName::System {
+                                    Span::styled("SYSTEM TRANSPARENT (System theme active)", Style::default().fg(colors.text_dim))
+                                } else if app.theme_background {
+                                    Span::styled("THEME BG (btop style palette background)", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))
+                                } else {
+                                    Span::styled("SYSTEM TRANSPARENT (Terminal wallpaper visible)", Style::default().fg(colors.warning).add_modifier(Modifier::BOLD))
+                                },
+                            ]),
+                            Line::from(""),
+                            Line::from(Span::styled("Modes explained:", Style::default().fg(colors.text))),
+                            Line::from(Span::styled(" • THEME BG: Fills window & panels with theme colors (like btop)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • SYSTEM TRANSPARENT: Keeps your terminal transparency / wallpaper", Style::default().fg(colors.text_dim))),
+                            Line::from(""),
+                            Line::from(Span::styled("💡 Tip: Select 'System / Terminal' theme if you want native terminal ANSI!", Style::default().fg(colors.secondary))),
+                            Line::from(""),
+                            Line::from(Span::styled("💡 Press [Enter], [b] or [Left/Right] to toggle background mode.", Style::default().fg(colors.warning))),
+                        ],
+                    ),
+                    2 => (
                         " 📊 CAVA Visualizer Settings ",
                         vec![
                             Line::from(Span::styled("Console-based Audio Visualizer (CAVA)", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))),
@@ -1183,7 +1298,7 @@ async fn main() -> Result<()> {
                             Line::from(Span::styled("💡 Press [Enter] or [v] to toggle visualizer.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    2 => (
+                    3 => (
                         " 🖼️ Cover Art Settings ",
                         vec![
                             Line::from(Span::styled("Download Covers for MPRIS Widget", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))),
@@ -1209,7 +1324,7 @@ async fn main() -> Result<()> {
                             Line::from(Span::styled("💡 Press [Enter] to toggle.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    3 => (
+                    4 => (
                         " 📻 Autoplay Settings ",
                         vec![
                             Line::from(Span::styled("Spotify-style Infinite Autoplay", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))),
@@ -1228,7 +1343,7 @@ async fn main() -> Result<()> {
                             Line::from(Span::styled("💡 Press [Enter] or [a] to toggle.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    4 => (
+                    5 => (
                         " 🔀 Shuffle Settings ",
                         vec![
                             Line::from(Span::styled("Smart Playlist Shuffle", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD))),
@@ -1247,7 +1362,7 @@ async fn main() -> Result<()> {
                             Line::from(Span::styled("💡 Press [Enter] or [s] to toggle.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    5 => (
+                    6 => (
                         " 👤 Account Settings ",
                         vec![
                             Line::from(Span::styled("SoundCloud Account", Style::default().fg(colors.warning).add_modifier(Modifier::BOLD))),
@@ -1263,7 +1378,7 @@ async fn main() -> Result<()> {
                             Line::from(Span::styled("💡 Press [Enter] or [Shift+L] to log in / out.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    6 => (
+                    7 => (
                         " 🗑️ Cache Settings ",
                         vec![
                             Line::from(Span::styled("Purge Cover Art Cache", Style::default().fg(colors.secondary).add_modifier(Modifier::BOLD))),
@@ -1279,7 +1394,14 @@ async fn main() -> Result<()> {
                 };
 
                 let widget = Paragraph::new(details)
-                    .block(Block::default().borders(Borders::ALL).title(title).border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)));
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(title)
+                            .border_type(BorderType::Rounded)
+                            .border_style(Style::default().fg(colors.border))
+                            .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
+                    );
                 f.render_widget(widget, main_chunks[1]);
             } else {
                 // Right Pane: Upcoming Queue
@@ -1299,7 +1421,14 @@ async fn main() -> Result<()> {
 
                 let queue_title = format!(" 📻 Upcoming Queue ({}) ", app.queue.len());
                 let queue_list = List::new(queue_items)
-                    .block(Block::default().borders(Borders::ALL).title(queue_title).border_type(BorderType::Rounded).border_style(Style::default().fg(colors.border)));
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(queue_title)
+                            .border_type(BorderType::Rounded)
+                            .border_style(Style::default().fg(colors.border))
+                            .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
+                    );
 
                 f.render_widget(queue_list, main_chunks[1]);
             }
@@ -1320,11 +1449,14 @@ async fn main() -> Result<()> {
 
             let time_str = format!("{} / {}", format_duration(state.position), format_duration(state.duration));
 
-            let outer_block = Block::default()
+            let mut outer_block = Block::default()
                 .borders(Borders::ALL)
                 .title(format!(" {} ", track_info))
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(colors.border_active));
+            if bg_widget_color != Color::Reset {
+                outer_block = outer_block.style(Style::default().bg(bg_widget_color));
+            }
 
             if app.cava_enabled {
                 let inner = outer_block.inner(chunks[2]);
@@ -1366,11 +1498,14 @@ async fn main() -> Result<()> {
                     else { ' ' }
                 }).collect();
 
-                let vis_widget = Paragraph::new(vec![
+                let mut vis_widget = Paragraph::new(vec![
                     Line::from(Span::styled(line_high, Style::default().fg(colors.visualizer_high))),
                     Line::from(Span::styled(line_mid, Style::default().fg(colors.visualizer_mid))),
                     Line::from(Span::styled(line_low, Style::default().fg(colors.visualizer_low))),
                 ]);
+                if bg_widget_color != Color::Reset {
+                    vis_widget = vis_widget.style(Style::default().bg(bg_widget_color));
+                }
                 f.render_widget(vis_widget, inner_chunks[1]);
             } else {
                 let gauge = Gauge::default()
@@ -1389,6 +1524,8 @@ async fn main() -> Result<()> {
                 Span::raw(" Toggle "),
                 Span::styled("[t]", Style::default().fg(colors.secondary).add_modifier(Modifier::BOLD)),
                 Span::raw(" Theme "),
+                Span::styled("[b]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
+                Span::raw(" BG "),
                 Span::styled("[v]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
                 Span::raw(" CAVA "),
                 Span::styled("[s]", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
@@ -1405,7 +1542,8 @@ async fn main() -> Result<()> {
                 Span::raw(" Quit "),
                 Span::styled(format!(" | {}", app.status_message), Style::default().fg(colors.warning)),
             ]))
-            .alignment(Alignment::Left);
+            .alignment(Alignment::Left)
+            .style(if bg_color != Color::Reset { Style::default().bg(bg_color) } else { Style::default() });
 
             f.render_widget(footer, chunks[3]);
         })?;
@@ -1613,6 +1751,9 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             KeyCode::Char('T') => {
                 app.prev_theme();
             }
+            KeyCode::Char('b') => {
+                app.toggle_theme_background();
+            }
             KeyCode::Char('v') => {
                 app.toggle_cava().await;
             }
@@ -1621,6 +1762,8 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                     let selected = app.settings_list_state.selected().unwrap_or(0);
                     if selected == 0 {
                         app.cycle_theme();
+                    } else if selected == 1 {
+                        app.toggle_theme_background();
                     } else {
                         app.toggle_setting().await;
                     }
@@ -1633,6 +1776,8 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                     let selected = app.settings_list_state.selected().unwrap_or(0);
                     if selected == 0 {
                         app.prev_theme();
+                    } else if selected == 1 {
+                        app.toggle_theme_background();
                     } else {
                         app.toggle_setting().await;
                     }
