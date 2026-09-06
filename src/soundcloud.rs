@@ -208,6 +208,8 @@ pub struct Config {
     pub cava_enabled: bool,
     #[serde(default)]
     pub theme: ThemeName,
+    #[serde(default)]
+    pub preset_theme: Option<ThemeName>,
     #[serde(default = "default_volume")]
     pub volume: f64,
     #[serde(default = "default_true")]
@@ -222,6 +224,7 @@ impl Default for Config {
             autoplay: true,
             cava_enabled: true,
             theme: ThemeName::Btop,
+            preset_theme: Some(ThemeName::Btop),
             volume: 85.0,
             theme_background: true,
         }
@@ -838,6 +841,7 @@ mod tests {
         assert!(config.autoplay);
         assert!(config.cava_enabled);
         assert_eq!(config.theme, ThemeName::Btop);
+        assert_eq!(config.preset_theme, None);
         assert_eq!(config.volume, 85.0);
         assert!(config.theme_background);
     }

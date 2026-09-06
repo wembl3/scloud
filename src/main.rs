@@ -25,7 +25,7 @@ use soundcloud::{Playlist, SearchFilter, SearchResultItem, SoundCloud, Track};
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use theme::ThemeName;
 use tokio::sync::mpsc;
 
@@ -37,7 +37,7 @@ enum ActiveTab {
     Settings,
 }
 
-const SETTINGS_COUNT: usize = 8;
+const SETTINGS_COUNT: usize = 9;
 
 #[derive(PartialEq)]
 enum ViewState {
@@ -158,7 +158,9 @@ struct App {
     cava: Arc<CavaManager>,
     cava_enabled: bool,
     theme: ThemeName,
+    preset_theme: ThemeName,
     theme_background: bool,
+    last_matugen_mtime: Option<SystemTime>,
     active_tab: ActiveTab,
     view_state: ViewState,
     search_filter: SearchFilter,
@@ -224,6 +226,15 @@ impl App {
             favorites_list_state.select(Some(0));
         }
 
+        let preset_theme = config
+            .preset_theme
+            .unwrap_or(if config.theme == ThemeName::Matugen {
+                ThemeName::Btop
+            } else {
+                config.theme
+            });
+        let last_matugen_mtime = theme::get_matugen_mtime();
+
         let mut app = Self {
             sc,
             player,
@@ -231,7 +242,9 @@ impl App {
             cava,
             cava_enabled: config.cava_enabled,
             theme: config.theme,
+            preset_theme,
             theme_background: config.theme_background,
+            last_matugen_mtime,
             active_tab: ActiveTab::Playlists,
             view_state: ViewState::PlaylistList,
             search_filter: SearchFilter::Tracks,
@@ -747,20 +760,74 @@ impl App {
         }
     }
 
-    fn cycle_theme(&mut self) {
-        self.theme = self.theme.next();
+    fn toggle_theme_mode(&mut self) {
+        if self.theme.is_matugen() {
+            self.theme = self.preset_theme;
+            self.status_message = format!("🎨 Switched to Preset Theme: {}", self.theme.colors().name);
+        } else {
+            self.theme = ThemeName::Matugen;
+            self.last_matugen_mtime = theme::get_matugen_mtime();
+            self.status_message = "🎨 Switched to Matugen (System Wallpaper)".to_string();
+        }
         self.needs_clear = true;
         let mut config = soundcloud::SoundCloud::load_config();
         config.theme = self.theme;
+        config.preset_theme = Some(self.preset_theme);
+        let _ = soundcloud::SoundCloud::save_config(&config);
+    }
+
+    fn cycle_preset_theme(&mut self) {
+        self.preset_theme = self.preset_theme.next_preset();
+        if !self.theme.is_matugen() {
+            self.theme = self.preset_theme;
+            self.needs_clear = true;
+        }
+        let mut config = soundcloud::SoundCloud::load_config();
+        config.theme = self.theme;
+        config.preset_theme = Some(self.preset_theme);
+        let _ = soundcloud::SoundCloud::save_config(&config);
+        self.status_message = format!("🎨 Preset Theme: {}", self.preset_theme.colors().name);
+    }
+
+    fn prev_preset_theme(&mut self) {
+        self.preset_theme = self.preset_theme.prev_preset();
+        if !self.theme.is_matugen() {
+            self.theme = self.preset_theme;
+            self.needs_clear = true;
+        }
+        let mut config = soundcloud::SoundCloud::load_config();
+        config.theme = self.theme;
+        config.preset_theme = Some(self.preset_theme);
+        let _ = soundcloud::SoundCloud::save_config(&config);
+        self.status_message = format!("🎨 Preset Theme: {}", self.preset_theme.colors().name);
+    }
+
+    fn cycle_theme(&mut self) {
+        self.theme = self.theme.next();
+        if !self.theme.is_matugen() {
+            self.preset_theme = self.theme;
+        } else {
+            self.last_matugen_mtime = theme::get_matugen_mtime();
+        }
+        self.needs_clear = true;
+        let mut config = soundcloud::SoundCloud::load_config();
+        config.theme = self.theme;
+        config.preset_theme = Some(self.preset_theme);
         let _ = soundcloud::SoundCloud::save_config(&config);
         self.status_message = format!("🎨 Theme switched to: {}", self.theme.colors().name);
     }
 
     fn prev_theme(&mut self) {
         self.theme = self.theme.prev();
+        if !self.theme.is_matugen() {
+            self.preset_theme = self.theme;
+        } else {
+            self.last_matugen_mtime = theme::get_matugen_mtime();
+        }
         self.needs_clear = true;
         let mut config = soundcloud::SoundCloud::load_config();
         config.theme = self.theme;
+        config.preset_theme = Some(self.preset_theme);
         let _ = soundcloud::SoundCloud::save_config(&config);
         self.status_message = format!("🎨 Theme switched to: {}", self.theme.colors().name);
     }
@@ -953,18 +1020,22 @@ impl App {
         let selected = self.settings_list_state.selected().unwrap_or(0);
         match selected {
             0 => {
-                // UI Theme
-                self.cycle_theme();
+                // UI Theme Mode (Matugen vs Preset)
+                self.toggle_theme_mode();
             }
             1 => {
+                // Preset Theme Selection
+                self.cycle_preset_theme();
+            }
+            2 => {
                 // Theme Background
                 self.toggle_theme_background();
             }
-            2 => {
+            3 => {
                 // CAVA Visualizer
                 self.toggle_cava().await;
             }
-            3 => {
+            4 => {
                 // Download Covers
                 self.download_covers = !self.download_covers;
                 let mut config = soundcloud::SoundCloud::load_config();
@@ -997,7 +1068,7 @@ impl App {
                     }
                 }
             }
-            4 => {
+            5 => {
                 // Autoplay
                 self.autoplay = !self.autoplay;
                 let mut config = soundcloud::SoundCloud::load_config();
@@ -1008,15 +1079,15 @@ impl App {
                     if self.autoplay { "ON (infinite similar music!)" } else { "OFF" }
                 );
             }
-            5 => {
+            6 => {
                 // Shuffle
                 self.toggle_shuffle();
             }
-            6 => {
+            7 => {
                 // Account
                 self.toggle_account().await;
             }
-            7 => {
+            8 => {
                 // Clear Cover Cache
                 let cache_dir = soundcloud::covers_cache_dir();
                 let mut count = 0;
@@ -1325,6 +1396,15 @@ async fn main() -> Result<()> {
     });
 
     loop {
+        if app.theme.is_matugen() {
+            let current_mtime = theme::get_matugen_mtime();
+            if current_mtime.is_some() && current_mtime != app.last_matugen_mtime {
+                app.last_matugen_mtime = current_mtime;
+                app.needs_clear = true;
+                app.status_message = "🎨 Matugen colors updated from wallpaper!".to_string();
+            }
+        }
+
         if app.needs_clear {
             let _ = terminal.clear();
             app.needs_clear = false;
@@ -1456,8 +1536,20 @@ async fn main() -> Result<()> {
 
                     let items = vec![
                         ListItem::new(Line::from(vec![
-                            Span::styled(" 🎨  UI Theme (btop palettes)            ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
-                            Span::styled(format!("[ {} ]", colors.name), Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
+                            Span::styled(" 🎨  UI Theme Mode                      ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
+                            if app.theme.is_matugen() {
+                                Span::styled("[ MATUGEN (System Wallpaper) ]", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD))
+                            } else {
+                                Span::styled("[ PRESET THEME ]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))
+                            },
+                        ])),
+                        ListItem::new(Line::from(vec![
+                            Span::styled(" 🎨  Preset Palette                     ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
+                            if app.theme.is_matugen() {
+                                Span::styled(format!("[ {} ] (Preset Inactive)", app.preset_theme.colors().name), Style::default().fg(colors.text_dim))
+                            } else {
+                                Span::styled(format!("[ {} ]", app.preset_theme.colors().name), Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))
+                            },
                         ])),
                         ListItem::new(Line::from(vec![
                             Span::styled(" 🌌  Theme Background Style             ", Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
@@ -1939,20 +2031,22 @@ async fn main() -> Result<()> {
                 let selected = app.settings_list_state.selected().unwrap_or(0);
                 let (title, details) = match selected {
                     0 => (
-                        " 🎨 UI Theme Settings ",
+                        " 🎨 UI Theme Mode Settings ",
                         vec![
-                            Line::from(Span::styled(format!("UI Theme: {}", colors.name), Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))),
+                            Line::from(Span::styled(
+                                format!("Current Mode: {}", if app.theme.is_matugen() { "MATUGEN (System Wallpaper)" } else { "PRESET THEME" }),
+                                Style::default().fg(colors.primary).add_modifier(Modifier::BOLD),
+                            )),
                             Line::from(""),
-                            Line::from(Span::styled("9 btop-inspired color palettes:", Style::default().fg(colors.text))),
-                            Line::from(Span::styled(" • btop Default (Classic navy palette from btop)", Style::default().fg(colors.text_dim))),
-                            Line::from(Span::styled(" • Catppuccin Mocha (Soft modern pastel)", Style::default().fg(colors.text_dim))),
-                            Line::from(Span::styled(" • Dracula (Classic purple dark)", Style::default().fg(colors.text_dim))),
-                            Line::from(Span::styled(" • Tokyo Night (Deep neon blue)", Style::default().fg(colors.text_dim))),
-                            Line::from(Span::styled(" • Nord (Arctic frost & teal)", Style::default().fg(colors.text_dim))),
-                            Line::from(Span::styled(" • Gruvbox Dark (Retro warm groove)", Style::default().fg(colors.text_dim))),
-                            Line::from(Span::styled(" • Cyberpunk (High-contrast neon)", Style::default().fg(colors.text_dim))),
-                            Line::from(Span::styled(" • Monokai Pro (Iconic vibrant)", Style::default().fg(colors.text_dim))),
-                            Line::from(Span::styled(" • System / Terminal (Native terminal ANSI & transparency)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled("Theme Modes:", Style::default().fg(colors.text))),
+                            Line::from(vec![
+                                Span::styled(" • MATUGEN: ", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
+                                Span::styled("Extracts colors dynamically from your desktop wallpaper via Matugen. Automatically updates when your wallpaper changes!", Style::default().fg(colors.text_dim)),
+                            ]),
+                            Line::from(vec![
+                                Span::styled(" • PRESET:  ", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
+                                Span::styled("Choose a fixed handcrafted color palette (btop, Catppuccin, Gruvbox, Dracula, Nord, etc.).", Style::default().fg(colors.text_dim)),
+                            ]),
                             Line::from(""),
                             Line::from(Span::styled("Active Palette Preview:", Style::default().fg(colors.text))),
                             Line::from(vec![
@@ -1964,10 +2058,39 @@ async fn main() -> Result<()> {
                                 Span::styled(" ■ Error ", Style::default().fg(colors.error)),
                             ]),
                             Line::from(""),
-                            Line::from(Span::styled("💡 Press [Enter], [t/T] or [Left/Right] to cycle theme.", Style::default().fg(colors.warning))),
+                            Line::from(Span::styled("💡 Press [Enter] or [Left/Right] to switch between Matugen and Preset mode.", Style::default().fg(colors.warning))),
+                            Line::from(Span::styled("💡 Press [t] or [Shift+T] anytime to cycle all themes.", Style::default().fg(colors.secondary))),
                         ],
                     ),
                     1 => (
+                        " 🎨 Preset Palette Settings ",
+                        vec![
+                            Line::from(Span::styled(
+                                format!("Selected Preset: {}", app.preset_theme.colors().name),
+                                Style::default().fg(colors.primary).add_modifier(Modifier::BOLD),
+                            )),
+                            Line::from(""),
+                            Line::from(Span::styled("9 Handcrafted Palettes:", Style::default().fg(colors.text))),
+                            Line::from(Span::styled(" • btop Default (Classic navy palette from btop)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Catppuccin Mocha (Soft modern pastel)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Dracula (Classic purple dark)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Tokyo Night (Deep neon blue)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Nord (Arctic frost & teal)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Gruvbox Dark (Retro warm groove)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Cyberpunk (High-contrast neon)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • Monokai Pro (Iconic vibrant)", Style::default().fg(colors.text_dim))),
+                            Line::from(Span::styled(" • System / Terminal (Native terminal ANSI & transparency)", Style::default().fg(colors.text_dim))),
+                            Line::from(""),
+                            Line::from(if app.theme.is_matugen() {
+                                Span::styled("ℹ️ Currently in Matugen mode. Set Theme Mode (row above) to Preset to use this palette.", Style::default().fg(colors.secondary))
+                            } else {
+                                Span::styled("✅ Active preset applied to UI.", Style::default().fg(colors.success))
+                            }),
+                            Line::from(""),
+                            Line::from(Span::styled("💡 Press [Enter] or [Left/Right] to cycle preset palettes.", Style::default().fg(colors.warning))),
+                        ],
+                    ),
+                    2 => (
                         " 🌌 Theme Background Settings ",
                         vec![
                             Line::from(Span::styled("Theme Background Fill (btop style)", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))),
@@ -1992,7 +2115,7 @@ async fn main() -> Result<()> {
                             Line::from(Span::styled("💡 Press [Enter], [b] or [Left/Right] to toggle background mode.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    2 => (
+                    3 => (
                         " 📊 CAVA Visualizer Settings ",
                         vec![
                             Line::from(Span::styled("Console-based Audio Visualizer (CAVA)", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))),
@@ -2028,7 +2151,7 @@ async fn main() -> Result<()> {
                             Line::from(Span::styled("💡 Press [Enter] or [v] to toggle visualizer.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    3 => (
+                    4 => (
                         " 🖼️ Cover Art Settings ",
                         vec![
                             Line::from(Span::styled("Download Covers for MPRIS Widget", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD))),
@@ -2054,7 +2177,7 @@ async fn main() -> Result<()> {
                             Line::from(Span::styled("💡 Press [Enter] to toggle.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    4 => (
+                    5 => (
                         " 📻 Autoplay Settings ",
                         vec![
                             Line::from(Span::styled("Spotify-style Infinite Autoplay", Style::default().fg(colors.success).add_modifier(Modifier::BOLD))),
@@ -2073,7 +2196,7 @@ async fn main() -> Result<()> {
                             Line::from(Span::styled("💡 Press [Enter] or [a] to toggle.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    5 => (
+                    6 => (
                         " 🔀 Shuffle Settings ",
                         vec![
                             Line::from(Span::styled("Smart Playlist Shuffle", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD))),
@@ -2092,7 +2215,7 @@ async fn main() -> Result<()> {
                             Line::from(Span::styled("💡 Press [Enter] or [s] to toggle.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    6 => (
+                    7 => (
                         " 👤 Account Settings ",
                         vec![
                             Line::from(Span::styled("SoundCloud Account", Style::default().fg(colors.warning).add_modifier(Modifier::BOLD))),
@@ -2108,7 +2231,7 @@ async fn main() -> Result<()> {
                             Line::from(Span::styled("💡 Press [Enter] or [Shift+L] to log in / out.", Style::default().fg(colors.warning))),
                         ],
                     ),
-                    7 => (
+                    8 => (
                         " 🗑️ Cache Settings ",
                         vec![
                             Line::from(Span::styled("Purge Cover Art Cache", Style::default().fg(colors.secondary).add_modifier(Modifier::BOLD))),
@@ -2990,8 +3113,10 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 if app.active_tab == ActiveTab::Settings {
                     let selected = app.settings_list_state.selected().unwrap_or(0);
                     if selected == 0 {
-                        app.cycle_theme();
+                        app.toggle_theme_mode();
                     } else if selected == 1 {
+                        app.cycle_preset_theme();
+                    } else if selected == 2 {
                         app.toggle_theme_background();
                     } else {
                         app.toggle_setting().await;
@@ -3051,8 +3176,10 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 if app.active_tab == ActiveTab::Settings {
                     let selected = app.settings_list_state.selected().unwrap_or(0);
                     if selected == 0 {
-                        app.prev_theme();
+                        app.toggle_theme_mode();
                     } else if selected == 1 {
+                        app.prev_preset_theme();
+                    } else if selected == 2 {
                         app.toggle_theme_background();
                     } else {
                         app.toggle_setting().await;
