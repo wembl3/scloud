@@ -2674,12 +2674,80 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn normalize_cyrillic(c: char) -> char {
+    match c {
+        // Top letter row (JCUKEN)
+        'й' => 'q', 'Й' => 'Q',
+        'ц' => 'w', 'Ц' => 'W',
+        'у' => 'e', 'У' => 'E',
+        'к' => 'r', 'К' => 'R',
+        'е' => 't', 'Е' => 'T',
+        'н' => 'y', 'Н' => 'Y',
+        'г' => 'u', 'Г' => 'U',
+        'ш' => 'i', 'Ш' => 'I',
+        'щ' => 'o', 'Щ' => 'O',
+        'з' => 'p', 'З' => 'P',
+        'х' => '[', 'Х' => '{',
+        'ъ' => ']', 'Ъ' => '}',
+
+        // Middle letter row
+        'ф' => 'a', 'Ф' => 'A',
+        'ы' => 's', 'Ы' => 'S',
+        'в' => 'd', 'В' => 'D',
+        'а' => 'f', 'А' => 'F',
+        'п' => 'g', 'П' => 'G',
+        'р' => 'h', 'Р' => 'H',
+        'о' => 'j', 'О' => 'J',
+        'л' => 'k', 'Л' => 'K',
+        'д' => 'l', 'Д' => 'L',
+        'ж' => ';', 'Ж' => ':',
+        'э' => '\'', 'Э' => '"',
+
+        // Bottom letter row
+        'я' => 'z', 'Я' => 'Z',
+        'ч' => 'x', 'Ч' => 'X',
+        'с' => 'c', 'С' => 'C',
+        'м' => 'v', 'М' => 'V',
+        'и' => 'b', 'И' => 'B',
+        'т' => 'n', 'Т' => 'N',
+        'ь' => 'm', 'Ь' => 'M',
+        'б' => ',', 'Б' => '<',
+        'ю' => '.', 'Ю' => '>',
+
+        // Layout punctuation:
+        // In standard Russian layout, physical '/' key produces '.' and Shift+'/' produces ','
+        '.' => '/',
+        ',' => '?',
+
+        // Ukrainian / Belarusian layout extensions
+        'і' => 's', 'І' => 'S',
+        'ї' => ']', 'Ї' => '}',
+        'є' => '\'', 'Є' => '"',
+        'ў' => 'w', 'Ў' => 'W',
+
+        other => other,
+    }
+}
+
 async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     let state_volume = app.player.state.read().await.volume;
 
+    // In normal navigation or context menus, normalize Cyrillic keys to Latin equivalents so
+    // that all shortcuts work seamlessly when a Russian keyboard layout is active.
+    // When actively typing a search query, preserve original input characters.
+    let key_code = if app.input_mode != InputMode::Searching || app.playlist_menu.is_some() || app.track_menu.is_some() {
+        if let KeyCode::Char(c) = key.code {
+            KeyCode::Char(normalize_cyrillic(c))
+        } else {
+            key.code
+        }
+    } else {
+        key.code
+    };
+
     // Handle playlist actions context menu when open
     if app.playlist_menu.is_some() {
-        match key.code {
+        match key_code {
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('q') => {
                 app.close_playlist_menu();
             }
@@ -2703,7 +2771,7 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
 
     // Handle track actions context menu when open
     if app.track_menu.is_some() {
-        match key.code {
+        match key_code {
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('q') => {
                 let is_submenu = app.track_menu.as_ref().map_or(false, |m| m.playlist_sub_menu);
                 if is_submenu {
@@ -2745,7 +2813,7 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     }
 
     match app.input_mode {
-        InputMode::Searching => match key.code {
+        InputMode::Searching => match key_code {
             KeyCode::Enter => {
                 app.input_mode = InputMode::Normal;
                 app.execute_search().await;
@@ -2767,7 +2835,7 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             }
             _ => {}
         },
-        InputMode::Normal => match key.code {
+        InputMode::Normal => match key_code {
             KeyCode::Char('q') => {
                 return true;
             }
@@ -3205,4 +3273,65 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         },
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_cyrillic_shortcuts() {
+        // Quit
+        assert_eq!(normalize_cyrillic('й'), 'q');
+        assert_eq!(normalize_cyrillic('Й'), 'Q');
+
+        // Theme cycle & prev
+        assert_eq!(normalize_cyrillic('е'), 't');
+        assert_eq!(normalize_cyrillic('Е'), 'T');
+
+        // Playback & toggles
+        assert_eq!(normalize_cyrillic('ф'), 'a'); // Autoplay
+        assert_eq!(normalize_cyrillic('ы'), 's'); // Shuffle
+        assert_eq!(normalize_cyrillic('т'), 'n'); // Next track
+        assert_eq!(normalize_cyrillic('з'), 'p'); // Play
+        assert_eq!(normalize_cyrillic('м'), 'v'); // Cava visualizer
+        assert_eq!(normalize_cyrillic('и'), 'b'); // Theme background
+        assert_eq!(normalize_cyrillic('а'), 'f'); // Favorite
+        assert_eq!(normalize_cyrillic('в'), 'd'); // Delete favorite
+        assert_eq!(normalize_cyrillic('к'), 'r'); // Refresh
+        assert_eq!(normalize_cyrillic('ь'), 'm'); // Context menu
+
+        // Navigation (vim keys)
+        assert_eq!(normalize_cyrillic('о'), 'j'); // Down
+        assert_eq!(normalize_cyrillic('л'), 'k'); // Up
+        assert_eq!(normalize_cyrillic('р'), 'h'); // Left
+
+        // Search & settings
+        assert_eq!(normalize_cyrillic('ш'), 'i'); // Search query
+        assert_eq!(normalize_cyrillic('щ'), 'o'); // Settings tab
+        assert_eq!(normalize_cyrillic('с'), 'c'); // Cycle filter
+        assert_eq!(normalize_cyrillic('С'), 'C'); // Prev filter
+        assert_eq!(normalize_cyrillic('.'), '/'); // Physical slash key in RU layout
+        assert_eq!(normalize_cyrillic(','), '?'); // Shift+slash in RU layout
+
+        // Account
+        assert_eq!(normalize_cyrillic('Д'), 'L'); // Account login
+
+        // Non-cyrillic remains unchanged
+        assert_eq!(normalize_cyrillic('q'), 'q');
+        assert_eq!(normalize_cyrillic('1'), '1');
+        assert_eq!(normalize_cyrillic(' '), ' ');
+    }
+
+    #[test]
+    fn test_normalize_regional_cyrillic() {
+        assert_eq!(normalize_cyrillic('і'), 's');
+        assert_eq!(normalize_cyrillic('І'), 'S');
+        assert_eq!(normalize_cyrillic('ї'), ']');
+        assert_eq!(normalize_cyrillic('Ї'), '}');
+        assert_eq!(normalize_cyrillic('є'), '\'');
+        assert_eq!(normalize_cyrillic('Є'), '"');
+        assert_eq!(normalize_cyrillic('ў'), 'w');
+        assert_eq!(normalize_cyrillic('Ў'), 'W');
+    }
 }
