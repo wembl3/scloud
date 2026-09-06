@@ -52,41 +52,32 @@ pub struct ThemeColors {
     pub visualizer_high: Color,
 }
 
-pub fn matugen_json_path() -> PathBuf {
+pub fn matugen_candidate_paths() -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config/sc-player/matugen.json")
-}
-
-pub fn matugen_kitty_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config/kitty/kitty-matugen-colors.conf")
-}
-
-pub fn matugen_nvim_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config/nvim/matugen_colors.lua")
+    let home_path = PathBuf::from(home);
+    vec![
+        home_path.join(".local/state/serpantinum/qs_matugen_colors.json"),
+        home_path.join(".local/state/serpantinum/qs_colors.json"),
+        home_path.join(".config/sc-player/matugen.json"),
+        home_path.join(".config/kitty/colors.conf"),
+        home_path.join(".config/kitty/kitty-matugen-colors.conf"),
+        home_path.join(".config/nvim/matugen_colors.lua"),
+    ]
 }
 
 pub fn get_matugen_mtime() -> Option<SystemTime> {
-    let p_json = matugen_json_path();
-    if let Ok(meta) = fs::metadata(&p_json) {
-        if let Ok(m) = meta.modified() {
-            return Some(m);
+    let mut latest: Option<SystemTime> = None;
+    for p in matugen_candidate_paths() {
+        if let Ok(meta) = fs::metadata(&p) {
+            if let Ok(m) = meta.modified() {
+                latest = match latest {
+                    None => Some(m),
+                    Some(cur) => Some(std::cmp::max(cur, m)),
+                };
+            }
         }
     }
-    let p_kitty = matugen_kitty_path();
-    if let Ok(meta) = fs::metadata(&p_kitty) {
-        if let Ok(m) = meta.modified() {
-            return Some(m);
-        }
-    }
-    let p_nvim = matugen_nvim_path();
-    if let Ok(meta) = fs::metadata(&p_nvim) {
-        if let Ok(m) = meta.modified() {
-            return Some(m);
-        }
-    }
-    None
+    latest
 }
 
 pub fn parse_hex_color(hex: &str) -> Option<Color> {
@@ -124,60 +115,128 @@ struct MatugenRawJson {
     visualizer_high: Option<String>,
 }
 
-fn parse_matugen_from_disk() -> ThemeColors {
-    // 1. Try reading ~/.config/sc-player/matugen.json
-    let p_json = matugen_json_path();
-    if let Ok(content) = fs::read_to_string(&p_json) {
-        if let Ok(raw) = serde_json::from_str::<MatugenRawJson>(&content) {
-            let bg = raw.bg.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(17, 19, 24));
-            let bg_widget = raw.bg_widget.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(29, 32, 36));
-            let border = raw.border.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(67, 71, 78));
-            let border_active = raw.border_active.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(165, 200, 255));
-            let text = raw.text.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(225, 226, 233));
-            let text_dim = raw.text_dim.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(141, 145, 153));
-            let primary = raw.primary.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(165, 200, 255));
-            let secondary = raw.secondary.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(188, 199, 220));
-            let accent = raw.accent.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(218, 189, 226));
-            let success = raw.success.as_deref().and_then(parse_hex_color).unwrap_or(primary);
-            let warning = raw.warning.as_deref().and_then(parse_hex_color).unwrap_or(accent);
-            let error = raw.error.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(255, 180, 171));
-            let highlight_bg = raw.highlight_bg.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(61, 71, 88));
-            let highlight_fg = raw.highlight_fg.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(216, 227, 248));
-            let gauge_bg = raw.gauge_bg.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(12, 14, 19));
-            let gauge_fg = raw.gauge_fg.as_deref().and_then(parse_hex_color).unwrap_or(primary);
-            let visualizer_low = raw.visualizer_low.as_deref().and_then(parse_hex_color).unwrap_or(primary);
-            let visualizer_mid = raw.visualizer_mid.as_deref().and_then(parse_hex_color).unwrap_or(secondary);
-            let visualizer_high = raw.visualizer_high.as_deref().and_then(parse_hex_color).unwrap_or(accent);
+#[derive(Debug, Deserialize, Default)]
+struct QsRawJson {
+    base: Option<String>,
+    crust: Option<String>,
+    surface0: Option<String>,
+    surface1: Option<String>,
+    surface2: Option<String>,
+    text: Option<String>,
+    subtext0: Option<String>,
+    subtext1: Option<String>,
+    blue: Option<String>,
+    sapphire: Option<String>,
+    peach: Option<String>,
+    green: Option<String>,
+    red: Option<String>,
+    mauve: Option<String>,
+    teal: Option<String>,
+}
 
-            return ThemeColors {
-                name: "Matugen (Wallpaper)",
-                title: "Matugen",
-                bg,
-                bg_widget,
-                border,
-                border_active,
-                text,
-                text_dim,
-                primary,
-                secondary,
-                accent,
-                success,
-                warning,
-                error,
-                highlight_bg,
-                highlight_fg,
-                gauge_bg,
-                gauge_fg,
-                visualizer_low,
-                visualizer_mid,
-                visualizer_high,
-            };
+fn parse_candidate_path(path: &PathBuf) -> Option<ThemeColors> {
+    let content = fs::read_to_string(path).ok()?;
+    let path_str = path.to_string_lossy();
+
+    if path_str.ends_with(".json") {
+        if let Ok(raw) = serde_json::from_str::<MatugenRawJson>(&content) {
+            if raw.primary.is_some() || raw.bg.is_some() {
+                let bg = raw.bg.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(39, 29, 26));
+                let bg_widget = raw.bg_widget.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(50, 40, 36));
+                let border = raw.border.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(61, 50, 47));
+                let border_active = raw.border_active.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(255, 181, 156));
+                let text = raw.text.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(241, 223, 217));
+                let text_dim = raw.text_dim.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(160, 141, 135));
+                let primary = raw.primary.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(255, 181, 156));
+                let secondary = raw.secondary.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(231, 189, 176));
+                let accent = raw.accent.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(214, 198, 141));
+                let success = raw.success.as_deref().and_then(parse_hex_color).unwrap_or(primary);
+                let warning = raw.warning.as_deref().and_then(parse_hex_color).unwrap_or(accent);
+                let error = raw.error.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(255, 180, 171));
+                let highlight_bg = raw.highlight_bg.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(114, 53, 31));
+                let highlight_fg = raw.highlight_fg.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(241, 223, 217));
+                let gauge_bg = raw.gauge_bg.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(20, 12, 10));
+                let gauge_fg = raw.gauge_fg.as_deref().and_then(parse_hex_color).unwrap_or(primary);
+                let visualizer_low = raw.visualizer_low.as_deref().and_then(parse_hex_color).unwrap_or(primary);
+                let visualizer_mid = raw.visualizer_mid.as_deref().and_then(parse_hex_color).unwrap_or(accent);
+                let visualizer_high = raw.visualizer_high.as_deref().and_then(parse_hex_color).unwrap_or(error);
+
+                return Some(ThemeColors {
+                    name: "Matugen (Wallpaper)",
+                    title: "Matugen",
+                    bg,
+                    bg_widget,
+                    border,
+                    border_active,
+                    text,
+                    text_dim,
+                    primary,
+                    secondary,
+                    accent,
+                    success,
+                    warning,
+                    error,
+                    highlight_bg,
+                    highlight_fg,
+                    gauge_bg,
+                    gauge_fg,
+                    visualizer_low,
+                    visualizer_mid,
+                    visualizer_high,
+                });
+            }
+        }
+
+        if let Ok(qs) = serde_json::from_str::<QsRawJson>(&content) {
+            if qs.blue.is_some() || qs.surface0.is_some() || qs.base.is_some() {
+                let primary = qs.blue.as_deref().or(qs.mauve.as_deref()).and_then(parse_hex_color).unwrap_or(Color::Rgb(255, 181, 156));
+                let secondary = qs.green.as_deref().or(qs.teal.as_deref()).and_then(parse_hex_color).unwrap_or(Color::Rgb(231, 189, 176));
+                let accent = qs.peach.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(214, 198, 141));
+                let bg = qs.surface0.as_deref().or(qs.base.as_deref()).and_then(parse_hex_color).unwrap_or(Color::Rgb(39, 29, 26));
+                let bg_widget = qs.surface1.as_deref().or(qs.surface0.as_deref()).and_then(parse_hex_color).unwrap_or(Color::Rgb(50, 40, 36));
+                let border = qs.surface2.as_deref().or(qs.subtext1.as_deref()).and_then(parse_hex_color).unwrap_or(Color::Rgb(61, 50, 47));
+                let border_active = primary;
+                let text = qs.text.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(241, 223, 217));
+                let text_dim = qs.subtext1.as_deref().or(qs.subtext0.as_deref()).and_then(parse_hex_color).unwrap_or(Color::Rgb(160, 141, 135));
+                let success = primary;
+                let warning = accent;
+                let error = qs.red.as_deref().and_then(parse_hex_color).unwrap_or(Color::Rgb(255, 180, 171));
+                let highlight_bg = qs.sapphire.as_deref().or(qs.surface2.as_deref()).and_then(parse_hex_color).unwrap_or(Color::Rgb(114, 53, 31));
+                let highlight_fg = text;
+                let gauge_bg = qs.crust.as_deref().or(qs.base.as_deref()).and_then(parse_hex_color).unwrap_or(Color::Rgb(20, 12, 10));
+                let gauge_fg = primary;
+                let visualizer_low = primary;
+                let visualizer_mid = accent;
+                let visualizer_high = error;
+
+                return Some(ThemeColors {
+                    name: "Matugen (Wallpaper)",
+                    title: "Matugen",
+                    bg,
+                    bg_widget,
+                    border,
+                    border_active,
+                    text,
+                    text_dim,
+                    primary,
+                    secondary,
+                    accent,
+                    success,
+                    warning,
+                    error,
+                    highlight_bg,
+                    highlight_fg,
+                    gauge_bg,
+                    gauge_fg,
+                    visualizer_low,
+                    visualizer_mid,
+                    visualizer_high,
+                });
+            }
         }
     }
 
-    // 2. Try reading ~/.config/kitty/kitty-matugen-colors.conf
-    let p_kitty = matugen_kitty_path();
-    if let Ok(content) = fs::read_to_string(&p_kitty) {
+    if path_str.ends_with(".conf") {
         let mut map = HashMap::new();
         for line in content.lines() {
             let t = line.trim();
@@ -190,45 +249,45 @@ fn parse_matugen_from_disk() -> ThemeColors {
             }
         }
 
-        let bg = map.get("background").and_then(|h| parse_hex_color(h)).unwrap_or(Color::Rgb(17, 19, 24));
-        let bg_widget = map.get("active_tab_background")
-            .or_else(|| map.get("color5"))
-            .or_else(|| map.get("selection_background"))
+        let bg = map.get("background").and_then(|h| parse_hex_color(h)).unwrap_or(Color::Rgb(39, 29, 26));
+        let bg_widget = map.get("selection_background")
+            .or_else(|| map.get("color0"))
+            .or_else(|| map.get("active_tab_background"))
             .and_then(|h| parse_hex_color(h))
-            .unwrap_or(Color::Rgb(29, 32, 36));
+            .unwrap_or(Color::Rgb(50, 40, 36));
         let border = map.get("inactive_border_color")
             .or_else(|| map.get("color0"))
             .and_then(|h| parse_hex_color(h))
-            .unwrap_or(Color::Rgb(67, 71, 78));
+            .unwrap_or(Color::Rgb(61, 50, 47));
         let primary = map.get("cursor")
             .or_else(|| map.get("active_border_color"))
             .or_else(|| map.get("color2"))
             .and_then(|h| parse_hex_color(h))
-            .unwrap_or(Color::Rgb(165, 200, 255));
+            .unwrap_or(Color::Rgb(255, 181, 156));
         let border_active = primary;
         let text = map.get("foreground")
             .or_else(|| map.get("color15"))
             .and_then(|h| parse_hex_color(h))
-            .unwrap_or(Color::Rgb(225, 226, 233));
+            .unwrap_or(Color::Rgb(241, 223, 217));
         let text_dim = map.get("color8")
             .or_else(|| map.get("color7"))
             .and_then(|h| parse_hex_color(h))
-            .unwrap_or(Color::Rgb(141, 145, 153));
+            .unwrap_or(Color::Rgb(160, 141, 135));
         let secondary = map.get("color4")
             .or_else(|| map.get("color12"))
             .and_then(|h| parse_hex_color(h))
-            .unwrap_or(Color::Rgb(188, 199, 220));
+            .unwrap_or(Color::Rgb(231, 189, 176));
         let accent = map.get("url_color")
             .or_else(|| map.get("color3"))
             .and_then(|h| parse_hex_color(h))
-            .unwrap_or(Color::Rgb(218, 189, 226));
-        let success = map.get("color10").or_else(|| map.get("color2")).and_then(|h| parse_hex_color(h)).unwrap_or(primary);
-        let warning = map.get("color11").or_else(|| map.get("color3")).and_then(|h| parse_hex_color(h)).unwrap_or(accent);
+            .unwrap_or(Color::Rgb(214, 198, 141));
+        let success = map.get("color2").or_else(|| map.get("color10")).and_then(|h| parse_hex_color(h)).unwrap_or(primary);
+        let warning = map.get("color3").or_else(|| map.get("color11")).and_then(|h| parse_hex_color(h)).unwrap_or(accent);
         let error = map.get("color1").or_else(|| map.get("bell_border_color")).and_then(|h| parse_hex_color(h)).unwrap_or(Color::Rgb(255, 180, 171));
-        let highlight_bg = map.get("selection_background").and_then(|h| parse_hex_color(h)).unwrap_or(Color::Rgb(61, 71, 88));
-        let highlight_fg = map.get("selection_foreground").and_then(|h| parse_hex_color(h)).unwrap_or(Color::Rgb(216, 227, 248));
+        let highlight_bg = map.get("selection_background").and_then(|h| parse_hex_color(h)).unwrap_or(Color::Rgb(114, 53, 31));
+        let highlight_fg = map.get("selection_foreground").and_then(|h| parse_hex_color(h)).unwrap_or(Color::Rgb(255, 219, 207));
 
-        return ThemeColors {
+        return Some(ThemeColors {
             name: "Matugen (Wallpaper)",
             title: "Matugen",
             bg,
@@ -248,34 +307,55 @@ fn parse_matugen_from_disk() -> ThemeColors {
             gauge_bg: bg,
             gauge_fg: primary,
             visualizer_low: primary,
-            visualizer_mid: secondary,
-            visualizer_high: accent,
-        };
+            visualizer_mid: accent,
+            visualizer_high: error,
+        });
     }
 
-    // 3. Fallback Material You Palette
+    None
+}
+
+fn parse_matugen_from_disk() -> ThemeColors {
+    let mut candidates: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for p in matugen_candidate_paths() {
+        if let Ok(meta) = fs::metadata(&p) {
+            if let Ok(m) = meta.modified() {
+                candidates.push((m, p));
+            }
+        }
+    }
+    // Sort descending by modified time (most recent first)
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+    for (_mtime, path) in candidates {
+        if let Some(colors) = parse_candidate_path(&path) {
+            return colors;
+        }
+    }
+
+    // Default warm Material You palette
     ThemeColors {
         name: "Matugen (Wallpaper)",
         title: "Matugen",
-        bg: Color::Rgb(17, 19, 24),              // #111318
-        bg_widget: Color::Rgb(29, 32, 36),       // #1d2024
-        border: Color::Rgb(67, 71, 78),          // #43474e
-        border_active: Color::Rgb(165, 200, 255),// #a5c8ff
-        text: Color::Rgb(225, 226, 233),         // #e1e2e9
-        text_dim: Color::Rgb(141, 145, 153),     // #8d9199
-        primary: Color::Rgb(165, 200, 255),      // #a5c8ff
-        secondary: Color::Rgb(188, 199, 220),    // #bcc7dc
-        accent: Color::Rgb(218, 189, 226),       // #dabde2
-        success: Color::Rgb(165, 200, 255),      // #a5c8ff
-        warning: Color::Rgb(218, 189, 226),      // #dabde2
-        error: Color::Rgb(255, 180, 171),        // #ffb4ab
-        highlight_bg: Color::Rgb(61, 71, 88),    // #3d4758
-        highlight_fg: Color::Rgb(216, 227, 248), // #d8e3f8
-        gauge_bg: Color::Rgb(12, 14, 19),        // #0c0e13
-        gauge_fg: Color::Rgb(165, 200, 255),     // #a5c8ff
-        visualizer_low: Color::Rgb(165, 200, 255),
-        visualizer_mid: Color::Rgb(188, 199, 220),
-        visualizer_high: Color::Rgb(218, 189, 226),
+        bg: Color::Rgb(39, 29, 26),
+        bg_widget: Color::Rgb(50, 40, 36),
+        border: Color::Rgb(61, 50, 47),
+        border_active: Color::Rgb(255, 181, 156),
+        text: Color::Rgb(241, 223, 217),
+        text_dim: Color::Rgb(160, 141, 135),
+        primary: Color::Rgb(255, 181, 156),
+        secondary: Color::Rgb(231, 189, 176),
+        accent: Color::Rgb(214, 198, 141),
+        success: Color::Rgb(255, 181, 156),
+        warning: Color::Rgb(214, 198, 141),
+        error: Color::Rgb(255, 180, 171),
+        highlight_bg: Color::Rgb(114, 53, 31),
+        highlight_fg: Color::Rgb(241, 223, 217),
+        gauge_bg: Color::Rgb(20, 12, 10),
+        gauge_fg: Color::Rgb(255, 181, 156),
+        visualizer_low: Color::Rgb(255, 181, 156),
+        visualizer_mid: Color::Rgb(214, 198, 141),
+        visualizer_high: Color::Rgb(255, 180, 171),
     }
 }
 
@@ -644,5 +724,6 @@ mod tests {
         let colors = ThemeName::Matugen.colors();
         assert_eq!(colors.name, "Matugen (Wallpaper)");
         assert_eq!(colors.title, "Matugen");
+        assert!(matches!(colors.primary, Color::Rgb(_, _, _)));
     }
 }
