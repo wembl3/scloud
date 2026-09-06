@@ -21,7 +21,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph},
     Terminal,
 };
-use soundcloud::{Playlist, SoundCloud, Track};
+use soundcloud::{Playlist, SearchFilter, SearchResultItem, SoundCloud, Track};
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -43,6 +43,45 @@ const SETTINGS_COUNT: usize = 8;
 enum ViewState {
     PlaylistList,
     PlaylistDetail,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum SearchViewState {
+    Results,
+    PlaylistDetail,
+}
+
+const PLAYLIST_MENU_ITEMS: [(&str, &str); 3] = [
+    ("▶", "Play All"),
+    ("🔀", "Shuffle Play"),
+    ("➕", "Add All to Queue"),
+];
+
+#[derive(Clone)]
+struct PlaylistMenuState {
+    pub playlist: Playlist,
+    pub selected: usize,
+}
+
+impl PlaylistMenuState {
+    pub fn new(playlist: Playlist) -> Self {
+        Self {
+            playlist,
+            selected: 0,
+        }
+    }
+
+    pub fn next(&mut self) {
+        self.selected = (self.selected + 1) % PLAYLIST_MENU_ITEMS.len();
+    }
+
+    pub fn prev(&mut self) {
+        if self.selected == 0 {
+            self.selected = PLAYLIST_MENU_ITEMS.len() - 1;
+        } else {
+            self.selected -= 1;
+        }
+    }
 }
 
 #[derive(PartialEq)]
@@ -122,8 +161,13 @@ struct App {
     theme_background: bool,
     active_tab: ActiveTab,
     view_state: ViewState,
+    search_filter: SearchFilter,
+    search_view_state: SearchViewState,
     search_query: String,
-    search_results: Vec<Track>,
+    search_results: Vec<SearchResultItem>,
+    search_playlist_tracks: Vec<Track>,
+    search_playlist_title: String,
+    search_playlist_track_list_state: ListState,
     favorites: Vec<Track>,
     user_playlists: Vec<Playlist>,
     selected_playlist_title: String,
@@ -135,6 +179,7 @@ struct App {
     track_list_state: ListState,
     settings_list_state: ListState,
     track_menu: Option<TrackMenuState>,
+    playlist_menu: Option<PlaylistMenuState>,
     current_track: Option<Track>,
     queue: VecDeque<Track>,
     history_ids: HashSet<u64>,
@@ -161,6 +206,9 @@ impl App {
         let mut search_list_state = ListState::default();
         search_list_state.select(Some(0));
 
+        let mut search_playlist_track_list_state = ListState::default();
+        search_playlist_track_list_state.select(Some(0));
+
         let mut playlist_list_state = ListState::default();
         playlist_list_state.select(Some(0));
 
@@ -186,8 +234,13 @@ impl App {
             theme_background: config.theme_background,
             active_tab: ActiveTab::Playlists,
             view_state: ViewState::PlaylistList,
+            search_filter: SearchFilter::Tracks,
+            search_view_state: SearchViewState::Results,
             search_query: String::new(),
             search_results: Vec::new(),
+            search_playlist_tracks: Vec::new(),
+            search_playlist_title: String::new(),
+            search_playlist_track_list_state,
             favorites,
             user_playlists: Vec::new(),
             selected_playlist_title: String::new(),
@@ -199,6 +252,7 @@ impl App {
             track_list_state,
             settings_list_state,
             track_menu: None,
+            playlist_menu: None,
             current_track: None,
             queue: VecDeque::new(),
             history_ids: HashSet::new(),
@@ -525,20 +579,172 @@ impl App {
 
         self.is_loading = true;
         self.active_tab = ActiveTab::Search;
-        self.status_message = format!("Searching for '{}'...", query);
+        self.search_view_state = SearchViewState::Results;
+        self.status_message = format!("Searching for '{}' ({:?})...", query, self.search_filter);
 
-        match self.sc.search_tracks(&query, 25).await {
+        match self.sc.search(&query, self.search_filter, 30).await {
             Ok(results) => {
-                self.status_message = format!("Found {} tracks for '{}'", results.len(), query);
+                self.status_message = format!(
+                    "Found {} {} for '{}'",
+                    results.len(),
+                    self.search_filter.label().to_lowercase(),
+                    query
+                );
                 self.search_results = results;
-                self.search_list_state.select(Some(0));
+                self.search_list_state.select(if self.search_results.is_empty() { None } else { Some(0) });
             }
             Err(e) => {
                 self.status_message = format!("Search failed: {}", e);
             }
         }
         self.is_loading = false;
-        self.input_mode = InputMode::Normal;
+    }
+
+    async fn cycle_search_filter(&mut self) {
+        self.search_filter = self.search_filter.next();
+        self.status_message = format!("🔍 Filter set to: {}", self.search_filter.label());
+        if !self.search_query.trim().is_empty() {
+            self.execute_search().await;
+        }
+    }
+
+    async fn prev_search_filter(&mut self) {
+        self.search_filter = self.search_filter.prev();
+        self.status_message = format!("🔍 Filter set to: {}", self.search_filter.label());
+        if !self.search_query.trim().is_empty() {
+            self.execute_search().await;
+        }
+    }
+
+    async fn open_search_playlist(&mut self, playlist: Playlist) {
+        self.is_loading = true;
+        self.search_playlist_title = playlist.title.clone();
+        self.status_message = format!("Loading tracks for playlist '{}'...", playlist.title);
+
+        match self.sc.get_playlist_tracks(playlist.id).await {
+            Ok(tracks) => {
+                self.status_message = format!("Playlist '{}': {} tracks loaded", playlist.title, tracks.len());
+                self.search_playlist_tracks = tracks;
+                self.search_view_state = SearchViewState::PlaylistDetail;
+                self.search_playlist_track_list_state.select(if self.search_playlist_tracks.is_empty() { None } else { Some(0) });
+            }
+            Err(e) => {
+                self.status_message = format!("Failed to open playlist: {}", e);
+            }
+        }
+        self.is_loading = false;
+    }
+
+    async fn play_search_playlist_track(&mut self, index: usize) {
+        if index >= self.search_playlist_tracks.len() {
+            return;
+        }
+        let track = self.search_playlist_tracks[index].clone();
+        self.selected_playlist_title = self.search_playlist_title.clone();
+        self.active_playlist = Some(PlaylistContext {
+            title: self.search_playlist_title.clone(),
+            original_tracks: self.search_playlist_tracks.clone(),
+        });
+
+        self.queue.clear();
+        for t in self.search_playlist_tracks.iter().skip(index + 1).cloned() {
+            self.queue.push_back(t);
+        }
+
+        self.play_track(track).await;
+    }
+
+    async fn play_entire_search_playlist_tracks(&mut self, shuffle: bool) {
+        if self.search_playlist_tracks.is_empty() {
+            return;
+        }
+        let mut play_tracks = self.search_playlist_tracks.clone();
+        if shuffle {
+            shuffle_slice(&mut play_tracks);
+        }
+        let first = play_tracks.remove(0);
+        self.selected_playlist_title = self.search_playlist_title.clone();
+        self.active_playlist = Some(PlaylistContext {
+            title: self.search_playlist_title.clone(),
+            original_tracks: self.search_playlist_tracks.clone(),
+        });
+        self.queue.clear();
+        for t in play_tracks {
+            self.queue.push_back(t);
+        }
+        self.play_track(first).await;
+    }
+
+    async fn play_entire_playlist_from_search(&mut self, playlist: Playlist, shuffle: bool) {
+        self.is_loading = true;
+        self.status_message = format!("Loading tracks for '{}'...", playlist.title);
+
+        match self.sc.get_playlist_tracks(playlist.id).await {
+            Ok(tracks) => {
+                if tracks.is_empty() {
+                    self.status_message = format!("Playlist '{}' has no playable tracks", playlist.title);
+                } else {
+                    let mut play_tracks = tracks.clone();
+                    if shuffle {
+                        shuffle_slice(&mut play_tracks);
+                    }
+                    let first = play_tracks.remove(0);
+                    self.selected_playlist_title = playlist.title.clone();
+                    self.active_playlist = Some(PlaylistContext {
+                        title: playlist.title,
+                        original_tracks: tracks,
+                    });
+                    self.queue.clear();
+                    for t in play_tracks {
+                        self.queue.push_back(t);
+                    }
+                    self.play_track(first).await;
+                }
+            }
+            Err(e) => {
+                self.status_message = format!("Failed to play playlist: {}", e);
+            }
+        }
+        self.is_loading = false;
+    }
+
+    fn open_playlist_menu(&mut self, playlist: Playlist) {
+        self.playlist_menu = Some(PlaylistMenuState::new(playlist));
+    }
+
+    fn close_playlist_menu(&mut self) {
+        self.playlist_menu = None;
+    }
+
+    async fn execute_playlist_menu_action(&mut self) {
+        if let Some(menu) = self.playlist_menu.take() {
+            match menu.selected {
+                0 => {
+                    self.play_entire_playlist_from_search(menu.playlist, false).await;
+                }
+                1 => {
+                    self.play_entire_playlist_from_search(menu.playlist, true).await;
+                }
+                2 => {
+                    self.is_loading = true;
+                    self.status_message = format!("Adding tracks from '{}' to queue...", menu.playlist.title);
+                    match self.sc.get_playlist_tracks(menu.playlist.id).await {
+                        Ok(tracks) => {
+                            let count = tracks.len();
+                            for t in tracks {
+                                self.queue.push_back(t);
+                            }
+                            self.status_message = format!("➕ Added {} tracks from '{}' to queue", count, menu.playlist.title);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Failed to add playlist to queue: {}", e);
+                        }
+                    }
+                    self.is_loading = false;
+                }
+                _ => {}
+            }
+        }
     }
 
     fn cycle_theme(&mut self) {
@@ -842,10 +1048,21 @@ impl App {
                 }
             }
             ActiveTab::Search => {
-                let len = self.search_results.len();
-                if len > 0 {
-                    let i = self.search_list_state.selected().map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
-                    self.search_list_state.select(Some(i));
+                match self.search_view_state {
+                    SearchViewState::Results => {
+                        let len = self.search_results.len();
+                        if len > 0 {
+                            let i = self.search_list_state.selected().map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
+                            self.search_list_state.select(Some(i));
+                        }
+                    }
+                    SearchViewState::PlaylistDetail => {
+                        let len = self.search_playlist_tracks.len();
+                        if len > 0 {
+                            let i = self.search_playlist_track_list_state.selected().map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
+                            self.search_playlist_track_list_state.select(Some(i));
+                        }
+                    }
                 }
             }
             ActiveTab::Playlists => {
@@ -884,10 +1101,21 @@ impl App {
                 }
             }
             ActiveTab::Search => {
-                let len = self.search_results.len();
-                if len > 0 {
-                    let i = self.search_list_state.selected().map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
-                    self.search_list_state.select(Some(i));
+                match self.search_view_state {
+                    SearchViewState::Results => {
+                        let len = self.search_results.len();
+                        if len > 0 {
+                            let i = self.search_list_state.selected().map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
+                            self.search_list_state.select(Some(i));
+                        }
+                    }
+                    SearchViewState::PlaylistDetail => {
+                        let len = self.search_playlist_tracks.len();
+                        if len > 0 {
+                            let i = self.search_playlist_track_list_state.selected().map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
+                            self.search_playlist_track_list_state.select(Some(i));
+                        }
+                    }
                 }
             }
             ActiveTab::Playlists => {
@@ -953,22 +1181,25 @@ fn print_help() {
     println!("  sc-player status        Check authentication status and current user");
     println!("  sc-player help          Print this help message\n");
     println!("CONTROLS IN PLAYER:");
-    println!("  1 / 2 / 3, TabSwitch between Playlists, Search, and Settings");
-    println!("  /             Search tracks globally");
-    println!("  Enter         Play selected track / Open playlist / Toggle setting");
-    println!("  Right / l / m Open Track Actions Menu (Queue, Station, Playlist)");
-    println!("  p             Play entire playlist");
-    println!("  s             Toggle Shuffle (randomizes playlist & queue)");
-    println!("  a             Toggle Spotify-style Autoplay (infinite related tracks)");
-    println!("  t / T         Cycle color themes (btop-inspired palettes)");
-    println!("  b             Toggle Theme Background (btop filled vs terminal transparent)");
-    println!("  v             Toggle CAVA audio visualizer");
-    println!("  Space         Pause / Play");
-    println!("  n             Next track");
-    println!("  Left / Right  Seek -5s / +5s (or switch theme / setting in Settings)");
-    println!("  + / -         Volume up / down");
-    println!("  Shift+L       Account Login / Logout");
-    println!("  q             Quit");
+    println!("  1 / 2 / 3 / 4, Tab Switch between Playlists, Favorites, Search, and Settings");
+    println!("  /                  Search tracks and playlists globally");
+    println!("  c / C, Tab         Cycle search filters (Tracks, Playlists, All)");
+    println!("  Enter              Play track / Open playlist / Toggle setting");
+    println!("  Right / m          Open Track or Playlist Actions Menu");
+    println!("  f                  Add / Remove from Favorites");
+    println!("  p                  Play entire playlist");
+    println!("  s                  Shuffle play playlist / Toggle queue shuffle");
+    println!("  a                  Toggle Spotify-style Autoplay (infinite related tracks)");
+    println!("  t / T              Cycle color themes (btop-inspired palettes)");
+    println!("  b                  Toggle Theme Background (btop filled vs terminal transparent)");
+    println!("  v                  Toggle CAVA audio visualizer");
+    println!("  Space              Pause / Play");
+    println!("  n                  Next track");
+    println!("  Left / Right       Seek -5s / +5s (or switch theme / setting in Settings)");
+    println!("  + / -              Volume up / down");
+    println!("  Shift+L            Account Login / Logout");
+    println!("  Esc / Backspace    Back from playlist details / close menu");
+    println!("  q                  Quit");
 }
 
 fn prompt_for_token() -> Result<String> {
@@ -1488,34 +1719,83 @@ async fn main() -> Result<()> {
 
                     let (search_title, border_color) = if app.input_mode == InputMode::Searching {
                         (
-                            " 🔍 Search SoundCloud (Press [Enter] to search, [Esc] to browse results) ",
+                            " 🔍 Search SoundCloud ([Enter] search, [Tab] filter, [Esc] done) ",
                             colors.border_active,
+                        )
+                    } else if app.search_view_state == SearchViewState::PlaylistDetail {
+                        (
+                            " 🔍 Search ([Esc] back to results, [/] new search) ",
+                            colors.border,
                         )
                     } else {
                         (
-                            " 🔍 Search Query (Press [/] to edit query, [Enter] to play selected) ",
+                            " 🔍 Search SoundCloud ([/] edit query, [c] toggle filter, [Enter] play/open) ",
                             colors.border,
                         )
                     };
 
-                    let search_line = if app.input_mode == InputMode::Searching {
-                        Line::from(vec![
+                    let mut search_spans = if app.input_mode == InputMode::Searching {
+                        vec![
                             Span::styled(" Query: ", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
                             Span::styled(&app.search_query, Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
                             Span::styled("█", Style::default().fg(colors.accent)),
-                        ])
+                        ]
                     } else if app.search_query.is_empty() {
-                        Line::from(vec![
+                        vec![
                             Span::styled(" Query: ", Style::default().fg(colors.text_dim)),
                             Span::styled("Press [/] to type query and search...", Style::default().fg(colors.text_dim)),
-                        ])
+                        ]
                     } else {
-                        Line::from(vec![
+                        vec![
                             Span::styled(" Query: ", Style::default().fg(colors.secondary).add_modifier(Modifier::BOLD)),
                             Span::styled(&app.search_query, Style::default().fg(colors.text)),
                             Span::styled(" (Press [/] to edit)", Style::default().fg(colors.text_dim)),
-                        ])
+                        ]
                     };
+
+                    let query_text_len = if app.input_mode == InputMode::Searching {
+                        8 + app.search_query.chars().count() + 1
+                    } else if app.search_query.is_empty() {
+                        8 + 36
+                    } else {
+                        8 + app.search_query.chars().count() + 19
+                    };
+
+                    let filter_pills_len = 38;
+                    let inner_w = search_chunks[0].width.saturating_sub(2) as usize;
+                    if inner_w > query_text_len + filter_pills_len {
+                        let pad = inner_w - query_text_len - filter_pills_len;
+                        search_spans.push(Span::raw(" ".repeat(pad)));
+                    } else {
+                        search_spans.push(Span::raw("  "));
+                    }
+
+                    search_spans.push(Span::styled(
+                        if app.search_filter == SearchFilter::Tracks { "[● 🎵 Tracks] " } else { "[○ 🎵 Tracks] " },
+                        if app.search_filter == SearchFilter::Tracks {
+                            Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(colors.text_dim)
+                        },
+                    ));
+                    search_spans.push(Span::styled(
+                        if app.search_filter == SearchFilter::Playlists { "[● 📁 Playlists] " } else { "[○ 📁 Playlists] " },
+                        if app.search_filter == SearchFilter::Playlists {
+                            Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(colors.text_dim)
+                        },
+                    ));
+                    search_spans.push(Span::styled(
+                        if app.search_filter == SearchFilter::All { "[● ✨ All]" } else { "[○ ✨ All]" },
+                        if app.search_filter == SearchFilter::All {
+                            Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(colors.text_dim)
+                        },
+                    ));
+
+                    let search_line = Line::from(search_spans);
 
                     let search_box = Paragraph::new(search_line)
                         .block(
@@ -1528,45 +1808,128 @@ async fn main() -> Result<()> {
                         );
                     f.render_widget(search_box, search_chunks[0]);
 
-                    let items: Vec<ListItem> = app
-                        .search_results
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, t)| {
-                            let dur = format_duration(t.duration as f64 / 1000.0);
-                            let fav_icon = if app.is_favorite(t.id) { "❤️ " } else { "   " };
-                            let content = Line::from(vec![
-                                Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(colors.text_dim)),
-                                Span::styled(fav_icon, Style::default().fg(colors.accent)),
-                                Span::styled(format!("{:<38} ", truncate_str(&t.title, 38)), Style::default().fg(colors.text)),
-                                Span::styled(format!("by {:<18} ", truncate_str(&t.user.username, 18)), Style::default().fg(colors.secondary)),
-                                Span::styled(dur, Style::default().fg(colors.primary)),
-                            ]);
-                            ListItem::new(content)
-                        })
-                        .collect();
+                    match app.search_view_state {
+                        SearchViewState::PlaylistDetail => {
+                            let items: Vec<ListItem> = app
+                                .search_playlist_tracks
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, t)| {
+                                    let dur = format_duration(t.duration as f64 / 1000.0);
+                                    let fav_icon = if app.is_favorite(t.id) { "❤️ " } else { "   " };
+                                    let content = Line::from(vec![
+                                        Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(colors.text_dim)),
+                                        Span::styled(fav_icon, Style::default().fg(colors.accent)),
+                                        Span::styled("🎵 ", Style::default().fg(colors.primary)),
+                                        Span::styled(format!("{:<36} ", truncate_str(&t.title, 36)), Style::default().fg(colors.text)),
+                                        Span::styled(format!("by {:<18} ", truncate_str(&t.user.username, 18)), Style::default().fg(colors.secondary)),
+                                        Span::styled(dur, Style::default().fg(colors.primary)),
+                                    ]);
+                                    ListItem::new(content)
+                                })
+                                .collect();
 
-                    let title = if app.is_loading {
-                        " 🎵 Search Results [Loading...] ".to_string()
-                    } else if app.search_results.is_empty() {
-                        " 🎵 Search Results (No tracks found or query empty) ".to_string()
-                    } else {
-                        format!(" 🎵 Search Results ({}) (Press [Enter] to play, [f] to favorite, [→/m] menu) ", app.search_results.len())
-                    };
+                            let title = if app.is_loading {
+                                format!(" 📁 Playlist: '{}' [Loading...] ", truncate_str(&app.search_playlist_title, 25))
+                            } else if app.search_playlist_tracks.is_empty() {
+                                format!(" 📁 Playlist: '{}' (No tracks) [Esc back] ", truncate_str(&app.search_playlist_title, 25))
+                            } else {
+                                format!(
+                                    " 📁 Playlist: '{}' ({} tracks) (Press [Enter] to play, [p] play all, [s] shuffle, [Esc] back) ",
+                                    truncate_str(&app.search_playlist_title, 25),
+                                    app.search_playlist_tracks.len()
+                                )
+                            };
 
-                    let list = List::new(items)
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .title(title)
-                                .border_type(BorderType::Rounded)
-                                .border_style(Style::default().fg(colors.border))
-                                .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
-                        )
-                        .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
-                        .highlight_symbol("▶ ");
+                            let list = List::new(items)
+                                .block(
+                                    Block::default()
+                                        .borders(Borders::ALL)
+                                        .title(title)
+                                        .border_type(BorderType::Rounded)
+                                        .border_style(Style::default().fg(colors.border))
+                                        .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
+                                )
+                                .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
+                                .highlight_symbol("▶ ");
 
-                    f.render_stateful_widget(list, search_chunks[1], &mut app.search_list_state);
+                            f.render_stateful_widget(list, search_chunks[1], &mut app.search_playlist_track_list_state);
+                        }
+                        SearchViewState::Results => {
+                            let items: Vec<ListItem> = app
+                                .search_results
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, item)| {
+                                    match item {
+                                        SearchResultItem::Track(t) => {
+                                            let dur = format_duration(t.duration as f64 / 1000.0);
+                                            let fav_icon = if app.is_favorite(t.id) { "❤️ " } else { "   " };
+                                            let content = Line::from(vec![
+                                                Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(colors.text_dim)),
+                                                Span::styled(fav_icon, Style::default().fg(colors.accent)),
+                                                Span::styled("🎵 ", Style::default().fg(colors.primary)),
+                                                Span::styled(format!("{:<36} ", truncate_str(&t.title, 36)), Style::default().fg(colors.text)),
+                                                Span::styled(format!("by {:<18} ", truncate_str(&t.user.username, 18)), Style::default().fg(colors.secondary)),
+                                                Span::styled(dur, Style::default().fg(colors.primary)),
+                                            ]);
+                                            ListItem::new(content)
+                                        }
+                                        SearchResultItem::Playlist(p) => {
+                                            let dur = format_duration(p.duration as f64 / 1000.0);
+                                            let author = p.user.as_ref().map_or("SoundCloud", |u| u.username.as_str());
+                                            let content = Line::from(vec![
+                                                Span::styled(format!("{:2}. ", idx + 1), Style::default().fg(colors.text_dim)),
+                                                Span::raw("   "),
+                                                Span::styled("📁 ", Style::default().fg(colors.accent)),
+                                                Span::styled(format!("{:<36} ", truncate_str(&p.title, 36)), Style::default().fg(colors.text).add_modifier(Modifier::BOLD)),
+                                                Span::styled(format!("by {:<18} ", truncate_str(author, 18)), Style::default().fg(colors.secondary)),
+                                                Span::styled(format!("({} tracks)  {}", p.track_count, dur), Style::default().fg(colors.primary)),
+                                            ]);
+                                            ListItem::new(content)
+                                        }
+                                    }
+                                })
+                                .collect();
+
+                            let filter_name = match app.search_filter {
+                                SearchFilter::Tracks => "Track",
+                                SearchFilter::Playlists => "Playlist",
+                                SearchFilter::All => "All",
+                            };
+
+                            let title = if app.is_loading {
+                                format!(" 🔍 {} Search Results [Loading...] ", filter_name)
+                            } else if app.search_results.is_empty() {
+                                if app.search_query.is_empty() {
+                                    " 🔍 Search SoundCloud (Press [/] to type query and search) ".to_string()
+                                } else {
+                                    format!(" 🔍 {} Results (No results found for '{}') ", filter_name, app.search_query)
+                                }
+                            } else {
+                                format!(
+                                    " 🔍 {} Results ({}) (Press [Enter] to {}, [c] filter, [p] play all, [→/m] menu) ",
+                                    filter_name,
+                                    app.search_results.len(),
+                                    if app.search_filter == SearchFilter::Playlists { "open playlist" } else { "select" }
+                                )
+                            };
+
+                            let list = List::new(items)
+                                .block(
+                                    Block::default()
+                                        .borders(Borders::ALL)
+                                        .title(title)
+                                        .border_type(BorderType::Rounded)
+                                        .border_style(Style::default().fg(colors.border))
+                                        .style(if bg_widget_color != Color::Reset { Style::default().bg(bg_widget_color) } else { Style::default() })
+                                )
+                                .highlight_style(Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD))
+                                .highlight_symbol("▶ ");
+
+                            f.render_stateful_widget(list, search_chunks[1], &mut app.search_list_state);
+                        }
+                    }
                 }
             }
 
@@ -1938,7 +2301,7 @@ async fn main() -> Result<()> {
             f.render_widget(gauge, chunks[2]);
 
             // 4. Footer controls help
-            let footer = Paragraph::new(Line::from(vec![
+            let mut footer_spans = vec![
                 Span::styled(" [Tab/1-4]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
                 Span::raw(" Tabs "),
                 Span::styled("[Enter]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
@@ -1947,6 +2310,14 @@ async fn main() -> Result<()> {
                 Span::raw(" Fav "),
                 Span::styled("[→/m]", Style::default().fg(colors.accent).add_modifier(Modifier::BOLD)),
                 Span::raw(" Menu "),
+            ];
+
+            if app.active_tab == ActiveTab::Search {
+                footer_spans.push(Span::styled("[c]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)));
+                footer_spans.push(Span::raw(" Filter "));
+            }
+
+            footer_spans.extend(vec![
                 Span::styled("[t]", Style::default().fg(colors.secondary).add_modifier(Modifier::BOLD)),
                 Span::raw(" Theme "),
                 Span::styled("[b]", Style::default().fg(colors.primary).add_modifier(Modifier::BOLD)),
@@ -1966,9 +2337,11 @@ async fn main() -> Result<()> {
                 Span::styled("[q]", Style::default().fg(colors.error).add_modifier(Modifier::BOLD)),
                 Span::raw(" Quit "),
                 Span::styled(format!(" | {}", app.status_message), Style::default().fg(colors.warning)),
-            ]))
-            .alignment(Alignment::Left)
-            .style(if bg_color != Color::Reset { Style::default().bg(bg_color) } else { Style::default() });
+            ]);
+
+            let footer = Paragraph::new(Line::from(footer_spans))
+                .alignment(Alignment::Left)
+                .style(if bg_color != Color::Reset { Style::default().bg(bg_color) } else { Style::default() });
 
             f.render_widget(footer, chunks[3]);
 
@@ -2059,6 +2432,50 @@ async fn main() -> Result<()> {
                     f.render_widget(list, popup_area);
                 }
             }
+
+            // 6. Floating Playlist Context Menu Modal
+            if let Some(ref menu) = app.playlist_menu {
+                let popup_width = 44.min(f.area().width.saturating_sub(4));
+                let popup_height = (PLAYLIST_MENU_ITEMS.len() as u16 + 2).min(f.area().height.saturating_sub(4));
+                let x = f.area().x + (f.area().width.saturating_sub(popup_width)) / 2;
+                let y = f.area().y + (f.area().height.saturating_sub(popup_height)) / 2;
+                let popup_area = Rect { x, y, width: popup_width, height: popup_height };
+
+                f.render_widget(Clear, popup_area);
+
+                let modal_bg = bg_widget_color;
+                let block_style = if modal_bg != Color::Reset {
+                    Style::default().bg(modal_bg)
+                } else {
+                    Style::default()
+                };
+
+                let inner_width = (popup_width as usize).saturating_sub(4);
+
+                let items: Vec<ListItem> = PLAYLIST_MENU_ITEMS.iter().enumerate().map(|(idx, &(icon, label))| {
+                    let is_sel = idx == menu.selected;
+                    let prefix = if is_sel { "❯ " } else { "  " };
+                    let line_str = format!("{}{:<2} {}", prefix, icon, label);
+                    let padded = format!("{:<width$}", line_str, width = inner_width);
+                    let style = if is_sel {
+                        Style::default().bg(colors.highlight_bg).fg(colors.highlight_fg).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(colors.text)
+                    };
+                    ListItem::new(Span::styled(padded, style))
+                }).collect();
+
+                let list = List::new(items)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(format!(" 📁 Playlist: '{}' ", truncate_str(&menu.playlist.title, 20)))
+                            .border_type(BorderType::Rounded)
+                            .border_style(Style::default().fg(colors.accent))
+                            .style(block_style)
+                    );
+                f.render_widget(list, popup_area);
+            }
         })?;
 
         let refresh_dur = if app.cava_enabled && !state.paused && app.current_track.is_some() {
@@ -2137,6 +2554,30 @@ async fn main() -> Result<()> {
 async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     let state_volume = app.player.state.read().await.volume;
 
+    // Handle playlist actions context menu when open
+    if app.playlist_menu.is_some() {
+        match key.code {
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('q') => {
+                app.close_playlist_menu();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(ref mut m) = app.playlist_menu {
+                    m.prev();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(ref mut m) = app.playlist_menu {
+                    m.next();
+                }
+            }
+            KeyCode::Enter => {
+                app.execute_playlist_menu_action().await;
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     // Handle track actions context menu when open
     if app.track_menu.is_some() {
         match key.code {
@@ -2183,6 +2624,7 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     match app.input_mode {
         InputMode::Searching => match key.code {
             KeyCode::Enter => {
+                app.input_mode = InputMode::Normal;
                 app.execute_search().await;
             }
             KeyCode::Char(c) => {
@@ -2195,12 +2637,10 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 app.input_mode = InputMode::Normal;
             }
             KeyCode::Tab => {
-                app.input_mode = InputMode::Normal;
-                app.active_tab = ActiveTab::Settings;
+                app.cycle_search_filter().await;
             }
             KeyCode::BackTab => {
-                app.input_mode = InputMode::Normal;
-                app.active_tab = ActiveTab::Favorites;
+                app.prev_search_filter().await;
             }
             _ => {}
         },
@@ -2247,6 +2687,12 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             KeyCode::Char('i') if app.active_tab == ActiveTab::Search => {
                 app.input_mode = InputMode::Searching;
             }
+            KeyCode::Char('c') if app.active_tab == ActiveTab::Search => {
+                app.cycle_search_filter().await;
+            }
+            KeyCode::Char('C') if app.active_tab == ActiveTab::Search => {
+                app.prev_search_filter().await;
+            }
             KeyCode::Down | KeyCode::Char('j') => {
                 app.select_next();
             }
@@ -2257,6 +2703,9 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 if app.active_tab == ActiveTab::Playlists && app.view_state == ViewState::PlaylistDetail {
                     app.view_state = ViewState::PlaylistList;
                     app.status_message = "Back to playlists list".to_string();
+                } else if app.active_tab == ActiveTab::Search && app.search_view_state == SearchViewState::PlaylistDetail {
+                    app.search_view_state = SearchViewState::Results;
+                    app.status_message = "Back to search results".to_string();
                 } else if app.active_tab != ActiveTab::Playlists {
                     app.active_tab = ActiveTab::Playlists;
                 }
@@ -2264,9 +2713,20 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             KeyCode::Char('f') => {
                 match app.active_tab {
                     ActiveTab::Search => {
-                        if let Some(i) = app.search_list_state.selected() {
-                            if let Some(track) = app.search_results.get(i).cloned() {
-                                app.toggle_favorite(track);
+                        match app.search_view_state {
+                            SearchViewState::Results => {
+                                if let Some(i) = app.search_list_state.selected() {
+                                    if let Some(SearchResultItem::Track(track)) = app.search_results.get(i).cloned() {
+                                        app.toggle_favorite(track);
+                                    }
+                                }
+                            }
+                            SearchViewState::PlaylistDetail => {
+                                if let Some(i) = app.search_playlist_track_list_state.selected() {
+                                    if let Some(track) = app.search_playlist_tracks.get(i).cloned() {
+                                        app.toggle_favorite(track);
+                                    }
+                                }
                             }
                         }
                     }
@@ -2323,10 +2783,26 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                         }
                     }
                     ActiveTab::Search => {
-                        if let Some(i) = app.search_list_state.selected() {
-                            if let Some(track) = app.search_results.get(i).cloned() {
-                                app.queue.clear();
-                                app.play_track(track).await;
+                        match app.search_view_state {
+                            SearchViewState::Results => {
+                                if let Some(i) = app.search_list_state.selected() {
+                                    if let Some(item) = app.search_results.get(i).cloned() {
+                                        match item {
+                                            SearchResultItem::Track(track) => {
+                                                app.queue.clear();
+                                                app.play_track(track).await;
+                                            }
+                                            SearchResultItem::Playlist(pl) => {
+                                                app.open_search_playlist(pl).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            SearchViewState::PlaylistDetail => {
+                                if let Some(i) = app.search_playlist_track_list_state.selected() {
+                                    app.play_search_playlist_track(i).await;
+                                }
                             }
                         }
                     }
@@ -2377,6 +2853,27 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                             app.play_entire_playlist().await;
                         }
                     }
+                } else if app.active_tab == ActiveTab::Search {
+                    match app.search_view_state {
+                        SearchViewState::Results => {
+                            if let Some(i) = app.search_list_state.selected() {
+                                if let Some(item) = app.search_results.get(i).cloned() {
+                                    match item {
+                                        SearchResultItem::Playlist(pl) => {
+                                            app.play_entire_playlist_from_search(pl, false).await;
+                                        }
+                                        SearchResultItem::Track(track) => {
+                                            app.queue.clear();
+                                            app.play_track(track).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        SearchViewState::PlaylistDetail => {
+                            app.play_entire_search_playlist_tracks(false).await;
+                        }
+                    }
                 }
             }
             KeyCode::Char('s') => {
@@ -2394,6 +2891,30 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                         app.queue.push_back(t);
                     }
                     app.play_track(first).await;
+                } else if app.active_tab == ActiveTab::Search {
+                    match app.search_view_state {
+                        SearchViewState::Results => {
+                            if let Some(i) = app.search_list_state.selected() {
+                                if let Some(item) = app.search_results.get(i).cloned() {
+                                    match item {
+                                        SearchResultItem::Playlist(pl) => {
+                                            app.play_entire_playlist_from_search(pl, true).await;
+                                        }
+                                        SearchResultItem::Track(_) => {
+                                            app.toggle_shuffle();
+                                        }
+                                    }
+                                } else {
+                                    app.toggle_shuffle();
+                                }
+                            } else {
+                                app.toggle_shuffle();
+                            }
+                        }
+                        SearchViewState::PlaylistDetail => {
+                            app.play_entire_search_playlist_tracks(true).await;
+                        }
+                    }
                 } else {
                     app.toggle_shuffle();
                 }
@@ -2428,9 +2949,27 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             }
             KeyCode::Char('m') => {
                 if app.active_tab == ActiveTab::Search {
-                    if let Some(i) = app.search_list_state.selected() {
-                        if let Some(track) = app.search_results.get(i).cloned() {
-                            app.open_track_menu(track);
+                    match app.search_view_state {
+                        SearchViewState::Results => {
+                            if let Some(i) = app.search_list_state.selected() {
+                                if let Some(item) = app.search_results.get(i).cloned() {
+                                    match item {
+                                        SearchResultItem::Track(track) => {
+                                            app.open_track_menu(track);
+                                        }
+                                        SearchResultItem::Playlist(playlist) => {
+                                            app.open_playlist_menu(playlist);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        SearchViewState::PlaylistDetail => {
+                            if let Some(i) = app.search_playlist_track_list_state.selected() {
+                                if let Some(track) = app.search_playlist_tracks.get(i).cloned() {
+                                    app.open_track_menu(track);
+                                }
+                            }
                         }
                     }
                 } else if app.active_tab == ActiveTab::Favorites {
@@ -2458,9 +2997,27 @@ async fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                         app.toggle_setting().await;
                     }
                 } else if app.active_tab == ActiveTab::Search {
-                    if let Some(i) = app.search_list_state.selected() {
-                        if let Some(track) = app.search_results.get(i).cloned() {
-                            app.open_track_menu(track);
+                    match app.search_view_state {
+                        SearchViewState::Results => {
+                            if let Some(i) = app.search_list_state.selected() {
+                                if let Some(item) = app.search_results.get(i).cloned() {
+                                    match item {
+                                        SearchResultItem::Track(track) => {
+                                            app.open_track_menu(track);
+                                        }
+                                        SearchResultItem::Playlist(playlist) => {
+                                            app.open_playlist_menu(playlist);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        SearchViewState::PlaylistDetail => {
+                            if let Some(i) = app.search_playlist_track_list_state.selected() {
+                                if let Some(track) = app.search_playlist_tracks.get(i).cloned() {
+                                    app.open_track_menu(track);
+                                }
+                            }
                         }
                     }
                 } else if app.active_tab == ActiveTab::Favorites {

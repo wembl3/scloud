@@ -97,6 +97,83 @@ struct SearchResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct SearchPlaylistsResponse {
+    pub collection: Vec<Playlist>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SearchFilter {
+    #[default]
+    Tracks,
+    Playlists,
+    All,
+}
+
+impl SearchFilter {
+    pub fn next(&self) -> Self {
+        match self {
+            SearchFilter::Tracks => SearchFilter::Playlists,
+            SearchFilter::Playlists => SearchFilter::All,
+            SearchFilter::All => SearchFilter::Tracks,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            SearchFilter::Tracks => SearchFilter::All,
+            SearchFilter::Playlists => SearchFilter::Tracks,
+            SearchFilter::All => SearchFilter::Playlists,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            SearchFilter::Tracks => "Tracks",
+            SearchFilter::Playlists => "Playlists",
+            SearchFilter::All => "All",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SearchResultItem {
+    Track(Track),
+    Playlist(Playlist),
+}
+
+#[allow(dead_code)]
+impl SearchResultItem {
+    pub fn title(&self) -> &str {
+        match self {
+            SearchResultItem::Track(t) => &t.title,
+            SearchResultItem::Playlist(p) => &p.title,
+        }
+    }
+
+    pub fn is_track(&self) -> bool {
+        matches!(self, SearchResultItem::Track(_))
+    }
+
+    pub fn is_playlist(&self) -> bool {
+        matches!(self, SearchResultItem::Playlist(_))
+    }
+
+    pub fn track(&self) -> Option<&Track> {
+        match self {
+            SearchResultItem::Track(t) => Some(t),
+            SearchResultItem::Playlist(_) => None,
+        }
+    }
+
+    pub fn playlist(&self) -> Option<&Playlist> {
+        match self {
+            SearchResultItem::Track(_) => None,
+            SearchResultItem::Playlist(p) => Some(p),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct StreamResolveResponse {
     pub url: String,
 }
@@ -501,6 +578,79 @@ for db_src in candidates:
         Ok(resp.collection)
     }
 
+    /// Search playlists
+    pub async fn search_playlists(&self, query: &str, limit: usize) -> Result<Vec<Playlist>> {
+        let url = format!(
+            "https://api-v2.soundcloud.com/search/playlists?q={}&client_id={}&limit={}",
+            urlencoding::encode(query),
+            self.client_id,
+            limit
+        );
+
+        let resp: SearchPlaylistsResponse = self
+            .client
+            .get(&url)
+            .headers(self.auth_headers())
+            .send()
+            .await?
+            .json()
+            .await?;
+        Ok(resp.collection)
+    }
+
+    /// Search all (mixed tracks and playlists)
+    pub async fn search_all(&self, query: &str, limit: usize) -> Result<Vec<SearchResultItem>> {
+        let url = format!(
+            "https://api-v2.soundcloud.com/search?q={}&client_id={}&limit={}",
+            urlencoding::encode(query),
+            self.client_id,
+            limit
+        );
+
+        let resp: serde_json::Value = self
+            .client
+            .get(&url)
+            .headers(self.auth_headers())
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let mut items = Vec::new();
+        if let Some(col) = resp.get("collection").and_then(|c| c.as_array()) {
+            for val in col {
+                let kind = val.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                if kind == "track" {
+                    if let Ok(track) = serde_json::from_value::<Track>(val.clone()) {
+                        items.push(SearchResultItem::Track(track));
+                    }
+                } else if kind == "playlist" {
+                    if let Ok(playlist) = serde_json::from_value::<Playlist>(val.clone()) {
+                        items.push(SearchResultItem::Playlist(playlist));
+                    }
+                }
+            }
+        }
+        Ok(items)
+    }
+
+    /// Unified search using the specified SearchFilter
+    pub async fn search(&self, query: &str, filter: SearchFilter, limit: usize) -> Result<Vec<SearchResultItem>> {
+        match filter {
+            SearchFilter::Tracks => {
+                let tracks = self.search_tracks(query, limit).await?;
+                Ok(tracks.into_iter().map(SearchResultItem::Track).collect())
+            }
+            SearchFilter::Playlists => {
+                let playlists = self.search_playlists(query, limit).await?;
+                Ok(playlists.into_iter().map(SearchResultItem::Playlist).collect())
+            }
+            SearchFilter::All => {
+                self.search_all(query, limit).await
+            }
+        }
+    }
+
     /// Spotify-like Autoplay: Get related tracks for track ID
     pub async fn get_related_tracks(&self, track_id: u64, limit: usize) -> Result<Vec<Track>> {
         let url = format!(
@@ -690,5 +840,61 @@ mod tests {
         assert_eq!(config.theme, ThemeName::Btop);
         assert_eq!(config.volume, 85.0);
         assert!(config.theme_background);
+    }
+
+    #[test]
+    fn test_search_filter_cycling() {
+        let filter = SearchFilter::Tracks;
+        assert_eq!(filter.next(), SearchFilter::Playlists);
+        assert_eq!(filter.next().next(), SearchFilter::All);
+        assert_eq!(filter.next().next().next(), SearchFilter::Tracks);
+
+        assert_eq!(filter.prev(), SearchFilter::All);
+        assert_eq!(filter.prev().prev(), SearchFilter::Playlists);
+        assert_eq!(filter.prev().prev().prev(), SearchFilter::Tracks);
+
+        assert_eq!(SearchFilter::Tracks.label(), "Tracks");
+        assert_eq!(SearchFilter::Playlists.label(), "Playlists");
+        assert_eq!(SearchFilter::All.label(), "All");
+    }
+
+    #[test]
+    fn test_search_result_item_variants() {
+        let track = Track {
+            id: 123,
+            title: "Track Title".to_string(),
+            duration: 180000,
+            artwork_url: None,
+            user: TrackUser {
+                username: "DJ Sound".to_string(),
+                avatar_url: None,
+            },
+            media: TrackMedia { transcodings: vec![] },
+        };
+        let playlist = Playlist {
+            id: 456,
+            title: "Playlist Title".to_string(),
+            duration: 900000,
+            track_count: 5,
+            user: Some(TrackUser {
+                username: "Curator".to_string(),
+                avatar_url: None,
+            }),
+        };
+
+        let item_t = SearchResultItem::Track(track);
+        let item_p = SearchResultItem::Playlist(playlist);
+
+        assert!(item_t.is_track());
+        assert!(!item_t.is_playlist());
+        assert_eq!(item_t.title(), "Track Title");
+        assert!(item_t.track().is_some());
+        assert!(item_t.playlist().is_none());
+
+        assert!(item_p.is_playlist());
+        assert!(!item_p.is_track());
+        assert_eq!(item_p.title(), "Playlist Title");
+        assert!(item_p.playlist().is_some());
+        assert!(item_p.track().is_none());
     }
 }
